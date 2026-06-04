@@ -1,0 +1,100 @@
+include: config/model/ad_base.yaml
+
+model: RAD
+
+# AD Transformer - smaller for computational efficiency
+# With n_transit=60 and n_compress_tokens=16:
+#   - Available space after compression: 60 - 16 - 1 = 43 tokens
+#   - Compression triggers every ~43 new transitions
+tf_n_embd: 64
+tf_n_layer: 4
+tf_n_head: 4
+tf_dropout: 0.1
+tf_attn_dropout: 0.1
+tf_n_inner: 128         # 2x embedding dim
+n_transit: 60           # Reduced from 240 - key computational saving
+
+# Compression Settings - compact latent representation
+n_compress_tokens: 16   # Reduced from 64 - more aggressive compression
+compress_n_layers: 3
+compress_n_heads: 4
+
+# Gradient control
+max_gradient_rounds: 100
+
+
+# Reconstruction regularization
+use_recon_reg: True
+recon_reg_weight: 0.5
+
+# Reward-weighted reconstruction (during fine-tuning)
+# Gives higher weight to transitions with positive rewards (goal-finding)
+use_reward_weighted_recon: True   # Enable/disable reward weighting
+reward_weight_multiplier: 5.0     # Weight for positive reward transitions (1.0 = no extra weight)
+
+# Curriculum settings (None = unlimited)
+max_compressions: null
+
+# Dataset settings
+# With n_transit=60, compression triggers at ~43 steps
+# Length categories adjusted accordingly:
+#   short: 20-50 (no compression needed)
+#   medium: 60-150 (1-2 compressions)
+#   long: 200-400 (3-8 compressions)
+#   very_long: 500-1000 (10+ compressions)
+min_context_length: 20
+max_context_length: 1000
+
+# Curriculum with stage-specific length distributions
+# NOTE: Final stage should start well before train_timesteps to allow learning!
+curriculum_schedule:
+  - step: 0
+    max_compressions: 1
+    # Focus on short/medium - learn basic AD and single compression
+    length_distribution:
+      short: 0.60       # No compression: 20-50
+      medium: 0.35      # 1-2 compressions: 60-150
+      long: 0.05        # Minimal long
+      very_long: 0.00   # None
+  - step: 30000
+    max_compressions: 3
+    # More compressions allowed
+    length_distribution:
+      short: 0.35
+      medium: 0.40
+      long: 0.20        # 3-8 compressions: 200-400
+      very_long: 0.05
+  - step: 50000
+    max_compressions: 6
+    # Balanced distribution
+    length_distribution:
+      short: 0.25
+      medium: 0.30
+      long: 0.30
+      very_long: 0.15
+  - step: 75000
+    max_compressions: null  # Unlimited - start 25k steps before end!
+    # Final distribution - maintain mix to prevent forgetting
+    length_distribution:
+      short: 0.25           # Keep short sequences to prevent forgetting!
+      medium: 0.25
+      long: 0.25
+      very_long: 0.25       # 10+ compressions: 500-1000
+
+# Training
+lr: 0.0003          # Can use higher LR for smaller model
+train_batch_size: 128 # Can use larger batch with smaller model
+test_batch_size: 256
+train_source_timesteps: 1000
+train_timesteps: 100000
+num_warmup_steps: 1000
+
+# Curriculum-aware LR scheduler settings
+stage_warmup_steps: 500   # Warmup steps at each curriculum stage transition
+min_lr_ratio: 0.1         # Minimum LR as ratio of base LR (10% of base)
+
+# Best model tracking
+save_best_model: True
+early_stopping_patience: 10  # Number of gen_intervals without improvement before warning
+
+num_workers: 4

@@ -1,0 +1,29 @@
+include: config/model/ad_base.yaml
+
+model: RAD
+
+# Compression Transformer (must match cad_dr.yaml)
+tf_n_embd: 64           # Match cad_dr.yaml
+tf_n_layer: 4           # Match cad_dr.yaml  
+tf_n_head: 4            # Match cad_dr.yaml
+tf_dropout: 0.1
+tf_attn_dropout: 0.1
+tf_n_inner: 128         # Match cad_dr.yaml
+n_transit: 60           # Match cad_dr.yaml - smaller context window
+
+# Compression Settings (must match cad_dr.yaml)
+n_compress_tokens: 16   # Match cad_dr.yaml - compact latent
+compress_n_layers: 3    # Match cad_dr.yaml
+compress_n_heads: 4     # Match cad_dr.yaml
+
+# Pre-training specific
+pretrain_timesteps: 35000   # Smaller model needs less pretraining
+pretrain_batch_size: 512    # Larger batch for smaller model
+pretrain_lr: 0.0003
+pretrain_warmup_steps: 1000
+
+# Dataset
+train_source_timesteps: 1000
+train_n_stream: 100
+
+num_workers: 16

@@ -1,0 +1,7 @@
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+__pycache__/
+**/runs/
+**/datasets/

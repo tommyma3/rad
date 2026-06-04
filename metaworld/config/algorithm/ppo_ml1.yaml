@@ -1,0 +1,21 @@
+alg: PPO
+policy: MlpPolicy
+
+alg_seed: 0
+
+# Env parallelism
+n_stream: 100
+n_process: 25
+
+# PPO parameters
+n_steps: 100            # steps per env before policy update
+batch_size: 200           # minibatch size for optimization
+n_epochs: 20             # number of epochs per update
+source_lr: 0.0003        # learning rate (slightly lower for stability)
+
+total_source_timesteps: 2000000
+
+# Performance options
+use_tensorboard: false   # Set to true to enable TensorBoard logging (slower)
+log_interval: 100        # Logging interval (higher = faster)
+use_gpu: false           # Set to true to use GPU (recommended: false for this workload)

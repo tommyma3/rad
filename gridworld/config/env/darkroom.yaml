@@ -1,0 +1,10 @@
+env: darkroom
+grid_size: 9
+dim_states: 2
+dim_actions: 1
+num_actions: 5
+
+horizon: 20
+env_split_seed: 0
+train_env_ratio: 0.9
+max_reward: 20

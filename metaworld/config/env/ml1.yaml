@@ -1,0 +1,9 @@
+env: metaworld
+task: door-open-v3
+
+mw_seed: 0
+horizon: 100
+max_reward: 1000
+
+dim_obs: 11
+dim_actions: 4

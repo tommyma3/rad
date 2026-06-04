@@ -1,0 +1,34 @@
+include: config/model/ad_base.yaml
+
+model: RAD
+
+# Compression Transformer (must match rad_ml1.yaml)
+tf_n_embd: 64
+tf_n_layer: 4
+tf_n_head: 8
+tf_dropout: 0.1
+tf_attn_dropout: 0.1
+tf_n_inner: 256
+n_transit: 200
+
+# Compression Settings (must match rad_ml1.yaml)
+n_compress_tokens: 64
+
+compress_n_layers: 3
+compress_n_heads: 4
+
+# Pre-training specific
+pretrain_timesteps: 50000
+pretrain_batch_size: 512
+pretrain_lr: 0.0003
+pretrain_warmup_steps: 1000
+
+# Dataset
+train_source_timesteps: 10000
+train_n_seed: 50
+train_n_stream: 100
+
+learn_var: True
+learn_transition: False
+
+num_workers: 4

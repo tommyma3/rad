@@ -1,0 +1,18 @@
+include: config/algorithm/ppo_base.yaml
+
+# Stronger tuning for corner-to-corner dark_key_to_door
+# Larger rollouts, more exploration (entropy), longer training budget.
+n_steps: 50
+batch_size: 100
+n_epochs: 10
+alg_seed: 0
+total_source_timesteps: 100000
+n_stream: 100
+source_lr: 0.0003
+n_process: 10
+
+
+# Notes:
+# - Higher entropy bonus encourages exploration for sparse rewards.
+# - Larger n_steps provides longer on-policy trajectories for stable updates.
+# - Use fewer processes than extreme parallelism to keep per-rollout length meaningful.

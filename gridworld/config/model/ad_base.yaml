@@ -1,0 +1,18 @@
+dynamics: False
+dynamics_strength: 1.0
+
+# training
+label_smoothing: 0.0
+flash_attn: True
+## optimizer
+beta1: 0.9
+beta2: 0.99
+weight_decay: 0.01
+
+# eval & logging
+summary_interval: 100
+eval_interval: 1000
+gen_interval: 10000
+ckpt_interval: 1000
+
+train_n_stream: 100

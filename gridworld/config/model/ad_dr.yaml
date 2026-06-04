@@ -1,0 +1,22 @@
+include: config/model/ad_base.yaml
+
+model: AD
+
+# Transformer
+tf_n_embd: 32
+tf_n_layer: 4
+tf_n_head: 4
+tf_dropout: 0.1
+tf_attn_dropout: 0.1
+tf_n_inner: 128
+n_transit: 240  
+
+# training
+lr: 0.0003  
+train_batch_size: 512
+test_batch_size: 2048
+train_source_timesteps: 1000
+train_timesteps: 50000
+num_warmup_steps: 1000  
+
+num_workers: 4

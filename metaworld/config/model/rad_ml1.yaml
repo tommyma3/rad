@@ -1,0 +1,90 @@
+include: config/model/ad_base.yaml
+
+model: RAD
+
+# AD Transformer
+tf_n_embd: 64
+tf_n_layer: 4
+tf_n_head: 8
+tf_dropout: 0.1
+tf_attn_dropout: 0.1
+tf_n_inner: 256
+n_transit: 200           # Reduced context window for efficiency
+
+# Compression Settings
+n_compress_tokens: 64    # Latent tokens for compression
+compress_n_layers: 3
+compress_n_heads: 4
+
+# Gradient control
+max_gradient_rounds: 99999
+
+# Reconstruction regularization
+use_recon_reg: True
+recon_reg_weight: 0.3
+
+# Curriculum settings (None = unlimited)
+max_compressions: null
+
+# Dataset settings
+min_context_length: 120
+max_context_length: 2000
+
+# Curriculum with stage-specific length distributions
+curriculum_schedule:
+  - step: 0
+    max_compressions: 1
+    length_distribution:
+      short: 0.60
+      medium: 0.35
+      long: 0.05
+      very_long: 0.00
+  - step: 30000
+    max_compressions: 3
+    length_distribution:
+      short: 0.35
+      medium: 0.40
+      long: 0.20
+      very_long: 0.05
+  - step: 60000
+    max_compressions: 6
+    length_distribution:
+      short: 0.25
+      medium: 0.30
+      long: 0.30
+      very_long: 0.15
+  - step: 80000
+    max_compressions: null
+    length_distribution:
+      short: 0.25
+      medium: 0.25
+      long: 0.25
+      very_long: 0.25
+
+# Training
+lr: 0.001
+train_batch_size: 128
+test_batch_size: 256
+train_source_timesteps: 10000
+test_source_timesteps: 2000
+train_timesteps: 100000
+num_warmup_steps: 1000
+
+learn_var: True
+learn_transition: False
+
+train_n_seed: 50
+train_n_stream: 100
+
+n_train_envs_per_task: 5
+n_test_envs_per_task: 10
+
+# Curriculum-aware LR scheduler settings
+stage_warmup_steps: 500
+min_lr_ratio: 0.1
+
+# Best model tracking
+save_best_model: True
+early_stopping_patience: 10
+
+num_workers: 4
