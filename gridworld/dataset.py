@@ -7,12 +7,14 @@ Contains:
 3. CompressionPretrainDataset - Dataset for compression pre-training
 """
 
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 import numpy as np
 from utils import get_traj_file_name
 import h5py
 import random
 from einops import rearrange, repeat
+from typing import Iterator, List
+import math
 
 
 class ADDataset(Dataset):
@@ -89,6 +91,76 @@ class ADDataset(Dataset):
             })
         
         return traj
+
+
+class LengthGroupedSampler(Sampler[List[tuple]]):
+    """
+    Sampler that groups RAD samples by length category to minimize padding.
+
+    Batches are formed from one category at a time, then shuffled across
+    categories. Each sampled index carries its category so DataLoader workers
+    can sample the matching context-length range without relying on shared
+    mutable dataset state.
+    """
+
+    def __init__(self, dataset: 'RADDataset', batch_size: int, shuffle: bool = True, drop_last: bool = False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self._refresh_length_assignments()
+
+    def _refresh_length_assignments(self):
+        """Assign each sample index to a length category based on current distribution."""
+        self.length_categories = {}
+
+        n_samples = len(self.dataset)
+        dist = self.dataset.length_distribution
+
+        category_counts = {}
+        remaining = n_samples
+        categories = list(dist.keys())
+
+        for category in categories[:-1]:
+            count = int(n_samples * dist[category])
+            category_counts[category] = count
+            remaining -= count
+        category_counts[categories[-1]] = remaining
+
+        indices = list(range(n_samples))
+        if self.shuffle:
+            random.shuffle(indices)
+
+        idx = 0
+        for category in categories:
+            count = category_counts[category]
+            self.length_categories[category] = indices[idx:idx + count]
+            idx += count
+
+    def __iter__(self) -> Iterator[List[tuple]]:
+        self._refresh_length_assignments()
+
+        all_batches = []
+        for category, indices in self.length_categories.items():
+            if self.shuffle:
+                indices = indices.copy()
+                random.shuffle(indices)
+
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i + self.batch_size]
+                if len(batch) == self.batch_size or not self.drop_last:
+                    all_batches.append((category, batch))
+
+        if self.shuffle:
+            random.shuffle(all_batches)
+
+        for category, batch in all_batches:
+            yield [(category, idx) for idx in batch]
+
+    def __len__(self) -> int:
+        if self.drop_last:
+            return len(self.dataset) // self.batch_size
+        return math.ceil(len(self.dataset) / self.batch_size)
 
 
 class RADDataset(Dataset):
@@ -172,6 +244,7 @@ class RADDataset(Dataset):
         
         self.seq_length = self.states.shape[1]
         self.n_histories = self.states.shape[0]
+        self._current_batch_category = None
     
     def _validate_distribution(self, dist):
         """Validate that distribution sums to 1.0."""
@@ -234,13 +307,44 @@ class RADDataset(Dataset):
         
         # Fallback
         return random.randint(self.min_context, min(self.max_context, max_available))
+
+    def _sample_context_length_for_category(self, category):
+        """Sample context length for a specific length category."""
+        max_available = self.seq_length - 1
+
+        if category == 'short':
+            low, high = 20, min(self.n_transit - 1, 50)
+        elif category == 'medium':
+            low, high = self.n_transit, min(150, self.max_context)
+        elif category == 'long':
+            low, high = 200, min(400, self.max_context)
+        elif category == 'very_long':
+            low, high = 500, self.max_context
+        elif category == 'extended':
+            low, high = 800, self.max_context
+        else:
+            low, high = self.min_context, self.max_context
+
+        high = min(high, max_available)
+        low = min(low, high)
+
+        return random.randint(low, high)
     
     def __getitem__(self, i):
+        category = None
+        if isinstance(i, tuple):
+            category, i = i
+
         # Use index for reproducibility but also allow randomness
         history_idx = i % self.n_histories
         
-        # Sample context length from distribution
-        context_length = self._sample_context_length()
+        # Sample context length from the grouped category if provided.
+        if category is not None:
+            context_length = self._sample_context_length_for_category(category)
+        elif self._current_batch_category is not None:
+            context_length = self._sample_context_length_for_category(self._current_batch_category)
+        else:
+            context_length = self._sample_context_length()
         
         # Sample a valid end position (where we predict action)
         max_end = self.seq_length - 1

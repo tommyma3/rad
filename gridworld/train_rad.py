@@ -92,18 +92,36 @@ def rad_collate_fn(batch, grid_size, num_actions=5):
     return res
 
 
-def get_rad_data_loader(dataset, batch_size, config, shuffle=True):
+def get_rad_data_loader(dataset, batch_size, config, shuffle=True, use_length_grouping=True):
     """Data loader for RAD with variable-length collate function."""
     from torch.utils.data import DataLoader
+    from dataset import LengthGroupedSampler
     
     collate_fn = partial(rad_collate_fn, grid_size=config['grid_size'], num_actions=config['num_actions'])
+    num_workers = config.get('num_workers', 0)
+
+    if use_length_grouping:
+        sampler = LengthGroupedSampler(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
+        )
+
     return DataLoader(
         dataset, 
         batch_size=batch_size, 
         shuffle=shuffle, 
         collate_fn=collate_fn, 
-        num_workers=config['num_workers'], 
-        persistent_workers=True
+        num_workers=num_workers, 
+        persistent_workers=num_workers > 0
     )
 
 # Curriculum schedule: (step, max_compressions)
