@@ -4,16 +4,17 @@ model: RAD
 
 # AD Transformer - match AD's proven config for DKTD
 # Using same embedding dim as AD (32) which works well
-tf_n_embd: 32
+tf_n_embd: 64
 tf_n_layer: 4
 tf_n_head: 4
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128         # 4x embedding dim
-n_transit: 100           # Larger context for more complex task
+n_transit: 120           # Larger context for more complex task
 
 # Compression Settings
-n_compress_tokens: 36   # More tokens to capture key+door info
+n_compress_tokens: 48   # More tokens to capture key+door info
+short_memory_keep: 36   # Recent uncompressed transitions kept after each recursive compression
 compress_n_layers: 4    # Deeper compression for better representation
 compress_n_heads: 4
 
@@ -70,7 +71,7 @@ curriculum_schedule:
 
 # Training
 lr: 0.0003
-train_batch_size: 128
+train_batch_size: 256
 test_batch_size: 256
 train_source_timesteps: 2000
 train_timesteps: 100000

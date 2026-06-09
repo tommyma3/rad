@@ -78,16 +78,37 @@ if __name__ == '__main__':
     else:
         raise ValueError('Unsupported env')
 
-    model.set_obs_space(envs.observation_space)
-    model.set_action_space(envs.action_space)
-    
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+    eval_timesteps = config['horizon'] * args.eval_episodes
 
     start_time = datetime.now()
     print(f'Starting at {start_time}')
     print(f'Evaluating for {args.eval_episodes} episodes')
 
-    # Simple episodic evaluation logic could be added here; reuse existing evaluators
+    with torch.no_grad():
+        eval_output = model.evaluate_in_context(vec_env=envs, eval_timesteps=eval_timesteps)
+        test_rewards = eval_output['reward_episode']
+        result_path = path.join(ckpt_dir, 'eval_result.npy')
+
+    end_time = datetime.now()
+    print()
+    print(f'Ended at {end_time}')
+    print(f'Elapsed time: {end_time - start_time}')
+
     envs.close()
+
+    with open(result_path, 'wb') as f:
+        np.save(f, test_rewards)
+
+    for i in range(len(test_env_args)):
+        print(f'Env {i} (goal={test_env_args[i]}): {test_rewards[i]}')
+
+    print("Mean reward per environment:", test_rewards.mean(axis=1))
+    print("Overall mean reward: ", test_rewards.mean())
+    print("Std deviation: ", test_rewards.std())
+    print("Total compressions: ", eval_output.get('total_compressions', 0))
+    print("Compression events: ", eval_output.get('compression_events', []))
+    print(f'Results saved to {result_path}')

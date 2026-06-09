@@ -16,6 +16,7 @@ n_transit: 60           # Reduced from 240 - key computational saving
 
 # Compression Settings - compact latent representation
 n_compress_tokens: 16   # Reduced from 64 - more aggressive compression
+short_memory_keep: 16   # Recent uncompressed transitions kept after each recursive compression
 compress_n_layers: 3
 compress_n_heads: 4
 
