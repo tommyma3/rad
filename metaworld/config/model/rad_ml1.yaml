@@ -13,15 +13,16 @@ n_transit: 200           # Reduced context window for efficiency
 
 # Compression Settings
 n_compress_tokens: 64    # Latent tokens for compression
+short_memory_keep: 64    # Recent uncompressed transitions kept after each recursive compression
 compress_n_layers: 3
 compress_n_heads: 4
 
 # Gradient control
-max_gradient_rounds: 99999
+max_gradient_rounds: 99
 
 # Reconstruction regularization
 use_recon_reg: True
-recon_reg_weight: 0.3
+recon_reg_weight: 0.1
 
 # Curriculum settings (None = unlimited)
 max_compressions: null

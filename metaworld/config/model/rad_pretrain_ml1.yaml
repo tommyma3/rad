@@ -13,6 +13,7 @@ n_transit: 200
 
 # Compression Settings (must match rad_ml1.yaml)
 n_compress_tokens: 64
+short_memory_keep: 64
 
 compress_n_layers: 3
 compress_n_heads: 4

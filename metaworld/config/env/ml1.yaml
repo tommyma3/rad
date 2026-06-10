@@ -1,5 +1,5 @@
 env: metaworld
-task: door-open-v3
+task: reach-v3
 
 mw_seed: 0
 horizon: 100

@@ -6,3 +6,5 @@ __pycache__/
 **/runs/
 **/datasets/
 **/accelerate_config.yaml
+**/figures/
+**/plot_eval_rewards.py

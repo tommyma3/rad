@@ -16,7 +16,7 @@ lr: 0.0003
 train_batch_size: 64  # Reduced from 512 to avoid OOM
 test_batch_size: 128   # Reduced from 2048 to avoid OOM
 train_source_timesteps: 10000
-test_source_timesteps: 2000
+test_source_timesteps: 10000
 train_timesteps: 50000
 num_warmup_steps: 0
 learn_var: True

@@ -198,6 +198,20 @@ def worker(config, env_cls, task_instance, traj_dir, env_idx, file_name, temp_di
             pass
 
 
+
+def save_collection_config(output_dir, file_name, config, description):
+    """Save the merged PPO/environment config next to the collected HDF5 file."""
+    config_path = os.path.join(output_dir, f'{file_name}_config.yaml')
+    payload = dict(config)
+    payload['collection_description'] = description
+    payload['saved_at'] = datetime.now().isoformat(timespec='seconds')
+
+    with open(config_path, 'w') as f:
+        yaml.safe_dump(payload, f, sort_keys=False)
+
+    print(f'  - Config saved to: {config_path}')
+
+
 class OptimizedHistoryCallback(BaseCallback):
     """Optimized callback that preallocates arrays and minimizes overhead.
     
@@ -336,6 +350,7 @@ def collect_histories(task_instances, path, file_name, config, description=""):
     print(f'  - Timesteps per task: {config["total_source_timesteps"]:,}')
     
     hdf5_path = os.path.join(path, f'{file_name}.hdf5')
+    save_collection_config(path, file_name, config, description)
     
     # Determine starting index
     start_idx = 0

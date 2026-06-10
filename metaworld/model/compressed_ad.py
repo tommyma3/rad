@@ -47,11 +47,17 @@ class RAD(nn.Module):
 
         # Compression config
         self.n_compress_tokens = config.get('n_compress_tokens', 32)
+        short_capacity = max(0, self.max_seq_length - self.n_compress_tokens - 1)
+        self.short_memory_keep = min(config.get('short_memory_keep', self.n_compress_tokens), short_capacity)
         self.compress_n_layers = config.get('compress_n_layers', 3)
         self.compress_n_heads = config.get('compress_n_heads', 4)
         self.max_gradient_rounds = config.get('max_gradient_rounds', 2)
         self.use_recon_reg = config.get('use_recon_reg', True)
         self.recon_reg_weight = config.get('recon_reg_weight', 0.1)
+
+        # Reward-weighted reconstruction config
+        self.use_reward_weighted_recon = config.get('use_reward_weighted_recon', True)
+        self.reward_weight_multiplier = config.get('reward_weight_multiplier', 5.0)
         
         # Curriculum settings
         self.max_compressions = config.get('max_compressions', None)  # None = unlimited
@@ -196,126 +202,171 @@ class RAD(nn.Module):
             
         return latent_tokens
 
-    def _forward_with_compression(self, context_embed, query_states_embed, rewards=None):
+    def _memory_sequence_len(self, latent_tokens, recent_context, query_len=1):
+        latent_len = 0 if latent_tokens is None else latent_tokens.shape[1]
+        recent_len = 0 if recent_context is None else recent_context.shape[1]
+        return latent_len + recent_len + query_len
+
+    def _pack_memory_input(self, latent_tokens, recent_context, query_states_embed):
+        """Build the AD input as long-term memory + short-term memory + query."""
+        has_recent = recent_context is not None and recent_context.shape[1] > 0
+
+        if latent_tokens is not None and has_recent:
+            transformer_input, _ = pack([latent_tokens, recent_context, query_states_embed], 'b * d')
+            return transformer_input, True
+        if latent_tokens is not None:
+            transformer_input, _ = pack([latent_tokens, query_states_embed], 'b * d')
+            return transformer_input, True
+        if has_recent:
+            transformer_input, _ = pack([recent_context, query_states_embed], 'b * d')
+            return transformer_input, False
+        return query_states_embed, False
+
+    def _append_recent(self, recent_context, chunk):
+        if recent_context is None or recent_context.shape[1] == 0:
+            return chunk
+        return torch.cat([recent_context, chunk], dim=1)
+
+    def _compress_memory_until_fits(
+        self,
+        latent_tokens,
+        recent_context,
+        recent_rewards=None,
+        compression_round=0,
+        compute_recon_loss=False,
+        respect_curriculum=True,
+    ):
         """
-        Forward pass with rolling compression for long sequences.
-        
-        Args:
-            context_embed: (batch, context_len, d_model) - all transition embeddings
-            query_states_embed: (batch, 1, d_model) - query state embedding
-            rewards: (batch, context_len, 1) - optional rewards for weighted reconstruction
-            
-        Returns:
-            transformer_output: (batch, seq_len, d_model)
-            compression_info: dict with compression statistics
+        Recursively compress old context into latent memory and keep a recent suffix.
+
+        The resulting representation is always:
+        latent long-term memory + recent short-term transitions + query.
         """
-        batch_size = context_embed.shape[0]
-        context_len = context_embed.shape[1]
-        
-        # Track reward positions for weighted reconstruction
-        self._current_rewards = rewards
-        self._compressed_start_idx = 0
-        
-        # Available space: max_seq_length - 1 (reserve for query token)
-        available_for_context = self.max_seq_length - 1
-        
         compression_info = {
             'num_compressions': 0,
-            'recon_loss': 0.0,
+            'recon_loss': torch.tensor(0.0, device=self.device),
         }
-        
-        # Check if compression is needed
-        if context_len <= available_for_context:
-            # No compression needed - standard forward
-            full_input, _ = pack([context_embed, query_states_embed], 'b * d')
-            transformer_output = self._forward_ad_transformer(full_input, has_latent_prefix=False)
-            return transformer_output, compression_info
-        
-        # Compression is needed
-        latent_tokens = None
-        remaining_context = context_embed
-        compression_round = 0
-        total_recon_loss = 0.0
-        
-        while True:
-            if latent_tokens is not None:
-                # We have latent tokens - available space reduced
-                available_for_new = self.max_seq_length - self.n_compress_tokens - 1  # -1 for query
-            else:
-                available_for_new = self.max_seq_length - 1  # -1 for query
-            
-            current_context_len = remaining_context.shape[1]
-            
-            # Check if we can fit everything now
-            total_needed = current_context_len + (self.n_compress_tokens if latent_tokens is not None else 0) + 1
-            
-            if total_needed <= self.max_seq_length:
-                # We can fit - build final input and exit loop
+
+        if recent_context is None:
+            return latent_tokens, recent_context, recent_rewards, compression_info
+
+        total_recon_loss = torch.tensor(0.0, device=recent_context.device)
+        query_len = 1
+
+        while self._memory_sequence_len(latent_tokens, recent_context, query_len=query_len) > self.max_seq_length:
+            if respect_curriculum and self.max_compressions is not None and compression_round >= self.max_compressions:
+                keep_len = self.max_seq_length - query_len
+                if latent_tokens is not None:
+                    keep_len -= self.n_compress_tokens
+                keep_len = max(0, keep_len)
+                recent_context = recent_context[:, -keep_len:] if keep_len > 0 else recent_context[:, :0]
+                if recent_rewards is not None:
+                    recent_rewards = recent_rewards[:, -keep_len:] if keep_len > 0 else recent_rewards[:, :0]
                 break
-            
-            # Check curriculum limit
-            if self.max_compressions is not None and compression_round >= self.max_compressions:
-                # Truncate instead of compressing more
-                keep_len = available_for_new
-                remaining_context = remaining_context[:, -keep_len:]
-                break
-            
-            # Need to compress
-            # Determine how much to compress
+
+            keep_len = min(self.short_memory_keep, recent_context.shape[1])
+            prefix_len = recent_context.shape[1] - keep_len
+
+            if prefix_len <= 0:
+                keep_len = max(0, self.max_seq_length - self.n_compress_tokens - query_len)
+                prefix_len = recent_context.shape[1] - keep_len
+                if prefix_len <= 0:
+                    break
+
+            transition_prefix = recent_context[:, :prefix_len]
             if latent_tokens is not None:
-                # Include latent tokens in compression input
-                # Keep some recent transitions outside compression
-                compress_end = current_context_len - available_for_new + self.n_compress_tokens
-                compress_input = torch.cat([latent_tokens, remaining_context[:, :compress_end - self.n_compress_tokens]], dim=1)
-                remaining_context = remaining_context[:, compress_end - self.n_compress_tokens:]
+                compress_input = torch.cat([latent_tokens, transition_prefix], dim=1)
             else:
-                # First compression - compress older transitions
-                compress_end = current_context_len - available_for_new + self.n_compress_tokens
-                compress_input = remaining_context[:, :compress_end]
-                remaining_context = remaining_context[:, compress_end:]
-            
-            # Perform compression
+                compress_input = transition_prefix
+
+            recent_context = recent_context[:, prefix_len:]
+
+            prefix_rewards = None
+            if recent_rewards is not None:
+                prefix_rewards = recent_rewards[:, :prefix_len]
+                recent_rewards = recent_rewards[:, prefix_len:]
+
             new_latent = self._compress_sequence(compress_input, compression_round)
-            
-            # Optional reward-weighted reconstruction loss
-            # Weigh positive-reward transitions higher
-            if self.training and self.use_recon_reg:
+
+            if compute_recon_loss and self.training and self.use_recon_reg:
                 reconstructed = self.reconstruction_decoder(new_latent, compress_input.shape[1])
-                
-                # Compute per-position MSE
-                position_mse = ((reconstructed - compress_input.detach()) ** 2).mean(dim=-1)  # (batch, seq_len)
-                
-                # Apply reward weighting if rewards are available
-                if self._current_rewards is not None and compression_round == 0:
-                    # Get rewards for the compressed positions
-                    compress_rewards = self._current_rewards[:, self._compressed_start_idx:self._compressed_start_idx + compress_end]
-                    compress_rewards = compress_rewards.squeeze(-1)  # (batch, seq_len)
-                    
-                    # Weight: 1.0 (zero) -> 5.0 (positive)
-                    reward_weights = 1.0 + 4.0 * (compress_rewards > 0).float()
+                position_mse = ((reconstructed - compress_input.detach()) ** 2).mean(dim=-1)
+
+                if (self.use_reward_weighted_recon and prefix_rewards is not None and latent_tokens is None):
+                    reward_weights = 1.0 + (self.reward_weight_multiplier - 1.0) * (prefix_rewards.squeeze(-1) > 0).float()
                     recon_loss = (position_mse * reward_weights).mean()
-                    
-                    # Update the start index for next compression
-                    self._compressed_start_idx += compress_end
                 else:
                     recon_loss = position_mse.mean()
-                
+
                 total_recon_loss = total_recon_loss + recon_loss
-            
+
             latent_tokens = new_latent
             compression_round += 1
-            compression_info['num_compressions'] = compression_round
-        
-        # Build final input for AD transformer
-        if latent_tokens is not None:
-            full_input, _ = pack([latent_tokens, remaining_context, query_states_embed], 'b * d')
-            transformer_output = self._forward_ad_transformer(full_input, has_latent_prefix=True)
-        else:
-            full_input, _ = pack([remaining_context, query_states_embed], 'b * d')
-            transformer_output = self._forward_ad_transformer(full_input, has_latent_prefix=False)
-        
+            compression_info['num_compressions'] += 1
+
         compression_info['recon_loss'] = total_recon_loss
-        
+        return latent_tokens, recent_context, recent_rewards, compression_info
+
+    def _roll_context_into_memory(self, context_embed, rewards=None, compute_recon_loss=False):
+        """Roll an offline context through the same chunked memory update used online."""
+        latent_tokens = None
+        recent_context = None
+        recent_rewards = None
+        compression_round = 0
+        total_recon_loss = torch.tensor(0.0, device=context_embed.device)
+        total_compressions = 0
+        cursor = 0
+
+        while cursor < context_embed.shape[1]:
+            latent_len = 0 if latent_tokens is None else self.n_compress_tokens
+            capacity = self.max_seq_length - latent_len - 1
+            recent_len = 0 if recent_context is None else recent_context.shape[1]
+            remaining = context_embed.shape[1] - cursor
+            room = capacity - recent_len
+
+            if remaining <= room:
+                take_len = remaining
+            else:
+                take_len = max(1, room + 1)
+                take_len = min(take_len, remaining)
+
+            chunk = context_embed[:, cursor:cursor + take_len]
+            recent_context = self._append_recent(recent_context, chunk)
+
+            if rewards is not None:
+                reward_chunk = rewards[:, cursor:cursor + take_len]
+                recent_rewards = self._append_recent(recent_rewards, reward_chunk)
+
+            cursor += take_len
+
+            latent_tokens, recent_context, recent_rewards, compression_info = self._compress_memory_until_fits(
+                latent_tokens=latent_tokens,
+                recent_context=recent_context,
+                recent_rewards=recent_rewards,
+                compression_round=compression_round,
+                compute_recon_loss=compute_recon_loss,
+                respect_curriculum=True,
+            )
+            compression_round += compression_info['num_compressions']
+            total_compressions += compression_info['num_compressions']
+            total_recon_loss = total_recon_loss + compression_info['recon_loss']
+
+        return latent_tokens, recent_context, {
+            'num_compressions': total_compressions,
+            'recon_loss': total_recon_loss,
+        }
+
+    def _forward_with_compression(self, context_embed, query_states_embed, rewards=None):
+        """Forward pass using recursive long-term memory plus short-term context."""
+        latent_tokens, recent_context, compression_info = self._roll_context_into_memory(
+            context_embed,
+            rewards=rewards,
+            compute_recon_loss=True,
+        )
+
+        full_input, has_latent = self._pack_memory_input(latent_tokens, recent_context, query_states_embed)
+        transformer_output = self._forward_ad_transformer(full_input, has_latent_prefix=has_latent)
+
         return transformer_output, compression_info
 
     def forward(self, x):
@@ -427,16 +478,10 @@ class RAD(nn.Module):
         for step in range(eval_timesteps):
             query_states_prev = query_states.clone().detach()
 
-            # Build input sequence
-            if latent_tokens is not None and transition_buffer is not None:
-                transformer_input, _ = pack([latent_tokens, transition_buffer, query_states_embed], 'e * h')
-                has_latent = True
-            elif transition_buffer is not None:
-                transformer_input, _ = pack([transition_buffer, query_states_embed], 'e * h')
-                has_latent = False
-            else:
-                transformer_input = query_states_embed
-                has_latent = False
+            # Build input sequence: long-term memory + short-term memory + query.
+            transformer_input, has_latent = self._pack_memory_input(
+                latent_tokens, transition_buffer, query_states_embed
+            )
 
             # Forward through AD transformer
             output = self._forward_ad_transformer(transformer_input, has_latent_prefix=has_latent)
@@ -488,24 +533,18 @@ class RAD(nn.Module):
             else:
                 transition_buffer = new_transition_embed
 
-            # Check if compression is needed
-            if latent_tokens is not None:
-                max_buffer_len = self.max_seq_length - self.n_compress_tokens - 1
-            else:
-                max_buffer_len = self.max_seq_length - 1
+            # Recursively compress old memory if needed, preserving a recent suffix.
+            latent_tokens, transition_buffer, _, compression_info = self._compress_memory_until_fits(
+                latent_tokens=latent_tokens,
+                recent_context=transition_buffer,
+                compression_round=compression_count,
+                compute_recon_loss=False,
+                respect_curriculum=True,
+            )
 
-            if transition_buffer.shape[1] >= max_buffer_len:
-                # Compress
-                if latent_tokens is not None:
-                    compress_input = torch.cat([latent_tokens, transition_buffer], dim=1)
-                else:
-                    compress_input = transition_buffer
-                
-                latent_tokens = self.compression_transformer(compress_input)
-                transition_buffer = None
-                
-                compression_count += 1
-                outputs['compression_events'].append(step)
+            if compression_info['num_compressions'] > 0:
+                compression_count += compression_info['num_compressions']
+                outputs['compression_events'].extend([step] * compression_info['num_compressions'])
 
         outputs['reward_episode'] = np.stack(outputs['reward_episode'], axis=1)
         outputs['success'] = np.maximum.accumulate(np.stack(outputs['success'], axis=1), axis=-1)
