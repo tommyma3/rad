@@ -443,6 +443,7 @@ class RAD(nn.Module):
         
         return result
 
+    @torch.inference_mode()
     def evaluate_in_context(self, vec_env, eval_timesteps, sample_size=1, beam_start=50, sample=True):
         """
         In-context evaluation with rolling compression.
@@ -457,7 +458,7 @@ class RAD(nn.Module):
         n_envs = vec_env.num_envs
 
         query_states = vec_env.reset()[:, self.obs_dim_idx]
-        query_states = torch.tensor(query_states, device=self.device, requires_grad=False, dtype=torch.float)
+        query_states = torch.as_tensor(query_states, device=self.device, dtype=torch.float)
         query_states = rearrange(query_states, 'e d -> e 1 d')
         query_states_embed = self.embed_query_state(query_states)
         
@@ -468,7 +469,7 @@ class RAD(nn.Module):
         compression_count = 0
 
         for step in range(eval_timesteps):
-            query_states_prev = query_states.clone().detach()
+            query_states_prev = query_states
 
             # Build input sequence: long-term memory + short-term memory + query.
             transformer_input, has_latent = self._pack_memory_input(
@@ -493,10 +494,10 @@ class RAD(nn.Module):
             actions = rearrange(actions, 'e d -> e 1 d')
 
             reward_episode += rewards
-            rewards_tensor = torch.tensor(rewards, device=self.device, requires_grad=False, dtype=torch.float)
+            rewards_tensor = torch.as_tensor(rewards, device=self.device, dtype=torch.float)
             rewards_tensor = rearrange(rewards_tensor, 'e -> e 1 1')
 
-            query_states = torch.tensor(query_states[:, self.obs_dim_idx], device=self.device, requires_grad=False, dtype=torch.float)
+            query_states = torch.as_tensor(query_states[:, self.obs_dim_idx], device=self.device, dtype=torch.float)
             query_states = rearrange(query_states, 'e d -> e 1 d')
             
             success += np.array([info['success'] for info in infos])
@@ -507,11 +508,11 @@ class RAD(nn.Module):
                 outputs['success'].append(success > 0.0)
                 success = np.zeros(vec_env.num_envs)
 
-                states_next = torch.tensor(np.stack([info['terminal_observation'][self.obs_dim_idx] for info in infos]),
-                                           device=self.device, dtype=torch.float)
+                states_next = torch.as_tensor(np.stack([info['terminal_observation'][self.obs_dim_idx] for info in infos]),
+                                              device=self.device, dtype=torch.float)
                 states_next = rearrange(states_next, 'e d -> e 1 d')
             else:
-                states_next = query_states.clone().detach()
+                states_next = query_states
 
             query_states_embed = self.embed_query_state(query_states)
 

@@ -21,7 +21,7 @@ import metaworld
 
 from env import make_env
 from model import MODEL
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
 
@@ -96,7 +96,7 @@ if __name__ == '__main__':
         for task_instance in task_instances:
             test_envs.append(make_env(config, env_cls, task_instance))
 
-    envs = SubprocVecEnv(test_envs)
+    envs = DummyVecEnv(test_envs)
     model.set_obs_space(envs.observation_space)
     model.set_action_space(envs.action_space)
     

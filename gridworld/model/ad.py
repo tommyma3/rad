@@ -83,6 +83,7 @@ class AD(torch.nn.Module):
 
         return result
 
+    @torch.inference_mode()
     def evaluate_in_context(self, vec_env, eval_timesteps, beam_k=0, sample=True):
         outputs = {}
         outputs['reward_episode'] = []
@@ -90,13 +91,13 @@ class AD(torch.nn.Module):
         reward_episode = np.zeros(vec_env.num_envs)
 
         query_states = vec_env.reset()
-        query_states = torch.tensor(query_states, device=self.device, requires_grad=False, dtype=torch.long)
+        query_states = torch.as_tensor(query_states, device=self.device, dtype=torch.long)
         query_states = rearrange(query_states, 'e d -> e 1 d')
         query_states_embed = self.embed_query_state(map_dark_states(query_states, self.grid_size))
         transformer_input = query_states_embed
 
         for step in range(eval_timesteps):
-            query_states_prev = query_states.clone().detach().to(torch.float)
+            query_states_prev = query_states.to(torch.float)
 
             # GPT-2 style transformer with causal masking
             output = self.transformer(transformer_input, use_causal_mask=True)
@@ -116,22 +117,22 @@ class AD(torch.nn.Module):
             actions = F.one_hot(actions, num_classes=self.config['num_actions'])
 
             reward_episode += rewards
-            rewards = torch.tensor(rewards, device=self.device, requires_grad=False, dtype=torch.float)
+            rewards = torch.as_tensor(rewards, device=self.device, dtype=torch.float)
             rewards = rearrange(rewards, 'e -> e 1 1')
 
-            query_states = torch.tensor(query_states, device=self.device, requires_grad=False, dtype=torch.long)
+            query_states = torch.as_tensor(query_states, device=self.device, dtype=torch.long)
             query_states = rearrange(query_states, 'e d -> e 1 d')
 
             if dones[0]:
                 outputs['reward_episode'].append(reward_episode)
                 reward_episode = np.zeros(vec_env.num_envs)
 
-                states_next = torch.tensor(np.stack([info['terminal_observation'] for info in infos]),
-                                           device=self.device, dtype=torch.float)
+                states_next = torch.as_tensor(np.stack([info['terminal_observation'] for info in infos]),
+                                              device=self.device, dtype=torch.float)
 
                 states_next = rearrange(states_next, 'e d -> e 1 d')
             else:
-                states_next = query_states.clone().detach().to(torch.float)
+                states_next = query_states.to(torch.float)
 
             query_states_embed = self.embed_query_state(map_dark_states(query_states, self.grid_size))
 

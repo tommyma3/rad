@@ -41,7 +41,7 @@ from transformers import get_cosine_schedule_with_warmup
 
 import multiprocessing
 from tqdm import tqdm
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 import metaworld
 
 import numpy as np

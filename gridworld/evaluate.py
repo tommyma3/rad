@@ -11,7 +11,7 @@ import os.path as path
 
 from env import SAMPLE_ENVIRONMENT, make_env
 from model import MODEL
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
@@ -43,9 +43,9 @@ if __name__ == '__main__':
     print("Evaluation goals: ", test_env_args)
 
     if env_name == 'darkroom':
-        envs = SubprocVecEnv([make_env(config, goal=arg) for arg in test_env_args])
+        envs = DummyVecEnv([make_env(config, goal=arg) for arg in test_env_args])
     elif env_name == 'dark_key_to_door':
-        envs = SubprocVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in test_env_args])
+        envs = DummyVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in test_env_args])
     else:
         raise NotImplementedError(f'Environment not supported: {env_name}')
     

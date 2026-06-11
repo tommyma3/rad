@@ -35,7 +35,7 @@ from transformers import get_cosine_schedule_with_warmup
 
 import multiprocessing
 from tqdm import tqdm
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 import metaworld
 
 def parse_arguments():
@@ -206,7 +206,7 @@ if __name__ == '__main__':
             for task_instance in task_instances:
                 test_envs.append(make_env(config, env_cls, task_instance))
 
-        envs = SubprocVecEnv(test_envs)
+        envs = DummyVecEnv(test_envs)
         
     # Set observation/action space on all processes (needed for model)
     # Use a dummy env on non-main processes to get the space info

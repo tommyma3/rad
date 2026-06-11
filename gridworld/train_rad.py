@@ -39,7 +39,7 @@ from transformers import get_cosine_schedule_with_warmup
 
 import multiprocessing
 from tqdm import tqdm
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from env import make_env
 import numpy as np
@@ -393,9 +393,9 @@ if __name__ == '__main__':
     env_args = train_env_args + test_env_args    
 
     if env_name == "darkroom":
-        envs = SubprocVecEnv([make_env(config, goal=arg) for arg in env_args])
+        envs = DummyVecEnv([make_env(config, goal=arg) for arg in env_args])
     elif env_name == "dark_key_to_door":
-        envs = SubprocVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in env_args])
+        envs = DummyVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in env_args])
     else:
         raise NotImplementedError(f'Environment not supported: {env_name}')
 

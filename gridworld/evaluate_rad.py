@@ -20,7 +20,7 @@ import numpy as np
 
 from env import SAMPLE_ENVIRONMENT, make_env
 from model import MODEL
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
 seed = 0
@@ -72,9 +72,9 @@ if __name__ == '__main__':
     print(f"Compression tokens: {config.get('n_compress_tokens', 'N/A')}")
 
     if env_name == 'darkroom':
-        envs = SubprocVecEnv([make_env(config, goal=arg) for arg in test_env_args])
+        envs = DummyVecEnv([make_env(config, goal=arg) for arg in test_env_args])
     elif env_name == 'dark_key_to_door':
-        envs = SubprocVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in test_env_args])
+        envs = DummyVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in test_env_args])
     else:
         raise ValueError('Unsupported env')
 

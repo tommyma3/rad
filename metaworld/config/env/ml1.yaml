@@ -1,5 +1,5 @@
 env: metaworld
-task: push-v3
+task: pick-place-v3
 
 mw_seed: 0
 horizon: 100
