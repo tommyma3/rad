@@ -171,10 +171,6 @@ def ad_collate_fn(batch):
     res['rewards'] = torch.tensor(np.array([item['rewards'] for item in batch]), requires_grad=False, dtype=torch.float)
     res['next_states'] = torch.tensor(np.array([item['next_states'] for item in batch]), requires_grad=False, dtype=torch.float)
     
-    if 'target_next_states' in batch[0].keys():        
-        res['target_next_states'] = torch.tensor(np.array([item['target_next_states'] for item in batch]), dtype=torch.float, requires_grad=False)
-        res['target_rewards'] = torch.tensor(np.array([item['target_rewards'] for item in batch]), dtype=torch.float, requires_grad=False)
-    
     return res
 
 def get_data_loader(dataset, batch_size, config, shuffle=True):

@@ -90,19 +90,13 @@ if __name__ == '__main__':
     print(f"Compression tokens: {config.get('n_compress_tokens', 'N/A')}")
 
     ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
-    train_envs = []
     test_envs = []
-    for task_name, env_cls in ml1.train_classes.items():
-        task_instances = [task for task in ml1.train_tasks if task.env_name == task_name]
-        for i in range(config['n_train_envs_per_task']):
-            train_envs.append(make_env(config, env_cls, task_instances[i]))
     for task_name, env_cls in ml1.test_classes.items():
         task_instances = [task for task in ml1.test_tasks if task.env_name == task_name]
-        for i in range(config['n_test_envs_per_task']):
-            test_envs.append(make_env(config, env_cls, task_instances[i]))
+        for task_instance in task_instances:
+            test_envs.append(make_env(config, env_cls, task_instance))
 
-    envs = train_envs + test_envs
-    envs = SubprocVecEnv(envs)
+    envs = SubprocVecEnv(test_envs)
     model.set_obs_space(envs.observation_space)
     model.set_action_space(envs.action_space)
     
@@ -115,19 +109,17 @@ if __name__ == '__main__':
     start_time = datetime.now()
     print(f'Starting at {start_time}')
     print(f'Evaluating for {eval_timesteps} timesteps')
+    print(f'Evaluating {len(test_envs)} test environments and 0 train environments')
 
     with torch.no_grad():
         eval_output = model.evaluate_in_context(
             vec_env=envs, 
             eval_timesteps=eval_timesteps
         )
-        train_rewards = eval_output['reward_episode'][:len(train_envs)]
-        test_rewards = eval_output['reward_episode'][len(train_envs):]
+        test_rewards = eval_output['reward_episode']
         if 'success' in eval_output.keys():
-            train_success = eval_output['success'][:len(train_envs)]
-            test_success = eval_output['success'][len(train_envs):]
+            test_success = eval_output['success']
         else:
-            train_success = None
             test_success = None
         # RAD-specific metrics
         total_compressions = eval_output.get('total_compressions', 0)
@@ -146,3 +138,16 @@ if __name__ == '__main__':
         np.save(f, eval_output['reward_episode'])
 
     print(f'\nResults saved to {result_path}')
+
+    # Print summary statistics
+    print('\n=== Test Environments ===')
+    print(f'Mean reward per env: {test_rewards.mean(axis=1)}')
+    print(f'Overall mean reward: {test_rewards.mean():.4f}')
+    print(f'Std deviation: {test_rewards.std():.4f}')
+    if test_success is not None:
+        print(f'Final success rate: {test_success[:, -1].mean():.4f}')
+
+    print('\n=== RAD Metrics ===')
+    print(f'Total compressions: {total_compressions}')
+    if compression_events:
+        print(f'Compression events: {compression_events}')

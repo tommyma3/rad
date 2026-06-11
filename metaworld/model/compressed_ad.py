@@ -90,14 +90,6 @@ class RAD(nn.Module):
             self.loss_fn_gaussian = nn.GaussianNLLLoss(full=True, reduction='mean')
         else:
             self.pred_actions = nn.Linear(tf_n_embd, config['dim_actions'])
-        
-        # Dynamics prediction (optional)
-        if config.get('dynamics', False):
-            self.embed_query_action = nn.Linear(config['dim_actions'], tf_n_embd)
-            self.pred_rewards = nn.Linear(tf_n_embd, 1)
-            
-            if config.get('learn_transition', False):
-                self.pred_next_states = nn.Linear(tf_n_embd, config['dim_obs'])
 
         # Compression Transformer
         self.compression_transformer = CompressionTransformer(

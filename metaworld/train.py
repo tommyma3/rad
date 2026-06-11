@@ -38,7 +38,6 @@ from tqdm import tqdm
 from stable_baselines3.common.vec_env import SubprocVecEnv
 import metaworld
 
-
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--alg-config', '-ac', required=False, default='./config/algorithm/ppo_ml1.yaml', help="Algorithm config")
@@ -53,7 +52,6 @@ def parse_arguments():
     parser.add_argument('--disable-tqdm', '-d', required=False, default=False, action='store_true')
     args = parser.parse_args()
     return args
-
 
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
@@ -82,7 +80,7 @@ if __name__ == '__main__':
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
 
-    log_dir = path.join(args.log_dir, f"{config['model']}-ml1-{config['task']}-dynamics{config.get('dynamics', False)}-var{config.get('learn_var', False)}")
+    log_dir = path.join(args.log_dir, f"{config['model']}-ml1-{config['task']}-var{config.get('learn_var', False)}")
     
     config['log_dir'] = log_dir
     config_save_path = path.join(config['log_dir'], 'config.yaml')
@@ -198,31 +196,24 @@ if __name__ == '__main__':
 
     # Define environments for evaluation (only on main process to avoid subprocess conflicts)
     envs = None
-    train_envs = []
     test_envs = []
     
     if is_main:
         ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
         
-        for task_name, env_cls in ml1.train_classes.items():
-            task_instances = [task for task in ml1.train_tasks if task.env_name == task_name]
-            for i in range(config['n_train_envs_per_task']):
-                train_envs.append(make_env(config, env_cls, task_instances[i]))
-        
         for task_name, env_cls in ml1.test_classes.items():
             task_instances = [task for task in ml1.test_tasks if task.env_name == task_name]
-            for i in range(config['n_test_envs_per_task']):
-                test_envs.append(make_env(config, env_cls, task_instances[i]))
+            for task_instance in task_instances:
+                test_envs.append(make_env(config, env_cls, task_instance))
 
-        envs = train_envs + test_envs
-        envs = SubprocVecEnv(envs)
+        envs = SubprocVecEnv(test_envs)
         
     # Set observation/action space on all processes (needed for model)
     # Use a dummy env on non-main processes to get the space info
     if not is_main:
         ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
-        for task_name, env_cls in ml1.train_classes.items():
-            task_instances = [task for task in ml1.train_tasks if task.env_name == task_name]
+        for task_name, env_cls in ml1.test_classes.items():
+            task_instances = [task for task in ml1.test_tasks if task.env_name == task_name]
             dummy_env = env_cls()
             dummy_env.set_task(task_instances[0])
             accelerator.unwrap_model(model).set_obs_space(dummy_env.observation_space)
@@ -252,13 +243,7 @@ if __name__ == '__main__':
             with accelerator.autocast():
                 output = model(batch)
 
-            if config.get('dynamics', False):
-                if config.get('learn_transition', False):
-                    loss = output['loss_action'] + (output['loss_reward'] + output['loss_next_state']) * config['dynamics_strength']
-                else:
-                    loss = output['loss_action'] + output['loss_reward'] * config['dynamics_strength']
-            else:
-                loss = output['loss_action']
+            loss = output['loss_action']
 
             optimizer.zero_grad()
             accelerator.backward(loss)
@@ -275,12 +260,6 @@ if __name__ == '__main__':
                 writer.add_scalar('train/loss_action', output['loss_action'].item(), step)
                 writer.add_scalar('train/lr', lr_sched.get_last_lr()[0], step)
 
-                if config.get('dynamics', False):
-                    writer.add_scalar('train/loss_reward', output['loss_reward'].item(), step)
-                    if config.get('learn_transition', False):
-                        writer.add_scalar('train/loss_next_state', output['loss_next_state'].item(), step)
-
-
             # Eval
             if is_main and step % config['eval_interval'] == 0 and test_dataloader is not None:
                 torch.cuda.empty_cache()
@@ -290,8 +269,6 @@ if __name__ == '__main__':
 
                 with torch.no_grad():
                     test_loss_action = 0.0
-                    test_loss_reward = 0.0
-                    test_loss_next_state = 0.0
                     test_cnt = 0
 
                     for j, batch in enumerate(test_dataloader):
@@ -301,21 +278,10 @@ if __name__ == '__main__':
                             output = model(batch)
                         cnt = len(batch['states'])
                         test_loss_action += output['loss_action'].item() * cnt
-                 
-                        if config.get('dynamics', False):
-                            test_loss_reward += output['loss_reward'].item() * cnt
-                            if config.get('learn_transition', False):
-                                test_loss_next_state += output['loss_next_state'].item() * cnt
 
                         test_cnt += cnt
 
                 writer.add_scalar('test/loss_action', test_loss_action / test_cnt, step)
-
-                if config.get('dynamics', False):
-                    writer.add_scalar('test/loss_reward', test_loss_reward / test_cnt, step)
-                    if config.get('learn_transition', False):
-                        writer.add_scalar('test/loss_next_state', test_loss_next_state / test_cnt, step)
-
 
                 eval_end_time = datetime.now()
                 print()
@@ -334,31 +300,16 @@ if __name__ == '__main__':
                     unwrapped = accelerator.unwrap_model(model)
                     output = unwrapped.evaluate_in_context(envs, config['test_source_timesteps'])
                     
-                    train_rewards = output['reward_episode'][:len(train_envs)]
-                    test_rewards = output['reward_episode'][len(train_envs):]
+                    test_rewards = output['reward_episode']
                     
                     if 'success' in output.keys():
-                        train_success = output['success'][:len(train_envs)]
-                        test_success = output['success'][len(train_envs):]
+                        test_success = output['success']
                         
-                        writer.add_scalar('train/success_rate', train_success.max(axis=1).mean(), step)
                         writer.add_scalar('test/success_rate', test_success.max(axis=1).mean(), step)
                         
                     else:
-                        train_success = None
                         test_success = None
                     
-
-                    log_in_context(values=train_rewards,
-                                   max_reward=config['max_reward'],
-                                   success=train_success,
-                                   episode_length=config['horizon'],
-                                   tag='train_gen/reward_episode',
-                                   title='',
-                                   xlabel='In-context steps',
-                                   ylabel='Reward',
-                                   step=step,
-                                   writer=writer)
 
                     log_in_context(values=test_rewards,
                                    max_reward=config['max_reward'],
@@ -401,7 +352,6 @@ if __name__ == '__main__':
                     'lr_sched': lr_sched.state_dict(),
                 }, new_ckpt_path)
                 print(f'\nCheckpoint saved to {new_ckpt_path}')
-
 
             if step >= config['train_timesteps']:
                 break

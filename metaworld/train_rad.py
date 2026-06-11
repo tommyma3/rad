@@ -522,27 +522,21 @@ if __name__ == '__main__':
     print(f'[Process {accelerator.process_index}] After environment setup barrier', flush=True)
     
     eval_envs = None
-    n_train_envs = config['n_train_envs_per_task']  # Default for non-main processes
+    n_test_envs = config.get('n_test_envs_per_task', 50)  # Default for non-main processes
     
     if is_main:
         print(f'Initializing Meta-world ML1 benchmark...', flush=True)
         ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
         
-        train_envs = []
         test_envs = []
-        
-        for task_name, env_cls in ml1.train_classes.items():
-            task_instances = [task for task in ml1.train_tasks if task.env_name == task_name]
-            for i in range(config['n_train_envs_per_task']):
-                train_envs.append(make_env(config, env_cls, task_instances[i]))
         
         for task_name, env_cls in ml1.test_classes.items():
             task_instances = [task for task in ml1.test_tasks if task.env_name == task_name]
-            for i in range(config['n_test_envs_per_task']):
-                test_envs.append(make_env(config, env_cls, task_instances[i]))
+            for task_instance in task_instances:
+                test_envs.append(make_env(config, env_cls, task_instance))
 
-        envs = train_envs + test_envs
-        n_train_envs = len(train_envs)
+        envs = test_envs
+        n_test_envs = len(test_envs)
         
         # Use DummyVecEnv to avoid multiprocessing conflicts
         # with Accelerate's distributed training on Windows
@@ -776,38 +770,21 @@ if __name__ == '__main__':
                         eval_timesteps=config['test_source_timesteps']
                     )
                     
-                    train_rewards = eval_output['reward_episode'][:n_train_envs]
-                    test_rewards = eval_output['reward_episode'][n_train_envs:]
+                    test_rewards = eval_output['reward_episode']
                     total_compressions = eval_output['total_compressions']
                     
-                    mean_train_reward = train_rewards.mean()
                     mean_test_reward = test_rewards.mean()
                     
                     if 'success' in eval_output.keys():
-                        train_success = eval_output['success'][:n_train_envs]
-                        test_success = eval_output['success'][n_train_envs:]
+                        test_success = eval_output['success']
                         
-                        writer.add_scalar('train/success_rate', train_success.max(axis=1).mean(), step)
                         writer.add_scalar('test/success_rate', test_success.max(axis=1).mean(), step)
                     else:
-                        train_success = None
                         test_success = None
                     
-                    writer.add_scalar('train_gen/mean_reward', mean_train_reward, step)
                     writer.add_scalar('test_gen/mean_reward', mean_test_reward, step)
                     writer.add_scalar('eval/total_compressions', total_compressions, step)
                     
-                    log_in_context(values=train_rewards,
-                                   max_reward=config['max_reward'],
-                                   success=train_success,
-                                   episode_length=config['horizon'],
-                                   tag='train_gen/reward_episode',
-                                   title='',
-                                   xlabel='In-context steps',
-                                   ylabel='Reward',
-                                   step=step,
-                                   writer=writer)
-
                     log_in_context(values=test_rewards,
                                    max_reward=config['max_reward'],
                                    success=test_success,
@@ -819,7 +796,7 @@ if __name__ == '__main__':
                                    step=step,
                                    writer=writer)
                     
-                    print(f'\nIn-context eval: train_reward={mean_train_reward:.3f}, test_reward={mean_test_reward:.3f}, compressions={total_compressions}')
+                    print(f'\nIn-context eval: test_envs={n_test_envs}, test_reward={mean_test_reward:.3f}, compressions={total_compressions}')
                     
                     # Best model tracking
                     if save_best_model and mean_test_reward > best_eval_reward:

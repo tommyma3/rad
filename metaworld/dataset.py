@@ -64,12 +64,6 @@ class ADDataset(Dataset):
             'rewards': self.rewards[history_idx, transition_idx:transition_idx + self.n_transit - 1],
             'next_states': self.next_states[history_idx, transition_idx:transition_idx + self.n_transit - 1],
         }
-        
-        if self.config.get('dynamics', False):
-            traj.update({
-                'target_next_states': self.next_states[history_idx, transition_idx + self.n_transit - 1],
-                'target_rewards': self.rewards[history_idx, transition_idx + self.n_transit - 1]
-            })
 
         return traj
 
@@ -185,7 +179,6 @@ class RADDataset(Dataset):
         self.env = config['env']
         self.n_transit = config['n_transit']  # Max AD sequence length
         self.n_compress_tokens = config.get('n_compress_tokens', 32)
-        self.dynamics = config.get('dynamics', False)
         
         # Context length distribution
         self.min_context = config.get('min_context_length', 50)
@@ -342,12 +335,6 @@ class RADDataset(Dataset):
             'context_length': context_length,  # For logging/debugging
         }
         
-        if self.dynamics:
-            traj.update({
-                'target_next_states': self.next_states[history_idx, end_idx],
-                'target_rewards': self.rewards[history_idx, end_idx],
-            })
-        
         return traj
 
 
@@ -362,7 +349,6 @@ class CompressionPretrainDataset(Dataset):
         self.config = config
         self.env = config['env']
         self.window_size = config['n_transit'] - 1  # Size of sequences to compress
-        self.dynamics = config.get('dynamics', False)
 
         states = []
         actions = []

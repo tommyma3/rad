@@ -30,6 +30,5 @@ train_n_seed: 50
 train_n_stream: 100
 
 learn_var: True
-learn_transition: False
 
 num_workers: 4
