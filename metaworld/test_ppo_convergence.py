@@ -14,8 +14,10 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import copy
 import json
+import multiprocessing as mp
 import os
 from datetime import datetime
 from pathlib import Path
@@ -58,8 +60,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--task-indices",
-        default="0",
-        help="Comma-separated task indices from the selected split. Defaults to the first train task.",
+        default="0,15,30,49",
+        help="Comma-separated task indices from the selected split. Defaults to 0,15,30,49.",
     )
     parser.add_argument(
         "--split",
@@ -123,8 +125,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
-        default="auto",
+        default="cpu",
         help="Torch device for PPO.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Number of task indices to evaluate in parallel. Defaults to all selected tasks.",
     )
     parser.add_argument(
         "--seed-offset",
@@ -266,7 +274,11 @@ def train_one_agent(
     device = select_device(local_config, args.device)
 
     train_env = make_vec_env(local_config, env_cls, task, n_envs, args.vec_env)
-    log_dir = str(output_dir / "tensorboard") if local_config.get("use_tensorboard", False) else None
+    log_dir = (
+        str(output_dir / "tensorboard" / f"task_{task_index}")
+        if local_config.get("use_tensorboard", False)
+        else None
+    )
 
     model = None
     history = []
@@ -333,6 +345,25 @@ def train_one_agent(
     return result
 
 
+def train_task_index(
+    task_index: int,
+    task_pool: list[tuple[type, Any]],
+    config: dict[str, Any],
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> dict[str, Any]:
+    env_cls, task = task_pool[task_index]
+    print(
+        f"Starting PPO agent for task index {task_index}: "
+        f"{getattr(task, 'env_name', config['task'])}",
+        flush=True,
+    )
+    result = train_one_agent(config, env_cls, task, task_index, args, output_dir)
+    verdict = "CONVERGED" if result["converged"] else "NOT CONVERGED"
+    print(f"Finished task {task_index}: {verdict}\n", flush=True)
+    return result
+
+
 def format_eval_line(task_index: int, metrics: dict[str, Any]) -> str:
     return (
         f"[task {task_index}] step={metrics['timesteps']:,} "
@@ -366,6 +397,8 @@ def main() -> None:
         raise ValueError("--eval-episodes must be positive.")
     if args.patience <= 0:
         raise ValueError("--patience must be positive.")
+    if args.num_workers is not None and args.num_workers <= 0:
+        raise ValueError("--num-workers must be positive.")
 
     config = build_config(args)
     if config["env"] not in SAMPLE_ENVIRONMENT:
@@ -396,14 +429,39 @@ def main() -> None:
     print()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for task_index in task_indices:
-        env_cls, task = task_pool[task_index]
-        print(f"Starting PPO agent for task index {task_index}: {getattr(task, 'env_name', config['task'])}")
-        result = train_one_agent(config, env_cls, task, task_index, args, args.output_dir)
-        results.append(result)
-        verdict = "CONVERGED" if result["converged"] else "NOT CONVERGED"
-        print(f"Finished task {task_index}: {verdict}\n")
+    num_workers = args.num_workers if args.num_workers is not None else len(task_indices)
+    num_workers = min(num_workers, len(task_indices))
+
+    if num_workers == 1:
+        results = [
+            train_task_index(task_index, task_pool, config, args, args.output_dir)
+            for task_index in task_indices
+        ]
+    else:
+        print(f"  parallel workers: {num_workers}")
+        print()
+        results_by_index = {}
+        ctx = mp.get_context("spawn")
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_workers,
+            mp_context=ctx,
+        ) as executor:
+            futures = {
+                executor.submit(
+                    train_task_index,
+                    task_index,
+                    task_pool,
+                    config,
+                    args,
+                    args.output_dir,
+                ): task_index
+                for task_index in task_indices
+            }
+            for future in concurrent.futures.as_completed(futures):
+                task_index = futures[future]
+                results_by_index[task_index] = future.result()
+
+        results = [results_by_index[task_index] for task_index in task_indices]
 
     summary_path = save_summary(args.output_dir, config, results)
     n_converged = sum(int(r["converged"]) for r in results)

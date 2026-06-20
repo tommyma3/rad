@@ -25,7 +25,7 @@ pretrain_lr: 0.0003
 pretrain_warmup_steps: 1000
 
 # Dataset
-train_source_timesteps: 10000
+train_source_timesteps: 2500
 train_n_seed: 50
 train_n_stream: 100
 

@@ -15,9 +15,9 @@ n_transit: 1000  # Reduced from 1000 to avoid OOM
 lr: 0.0003
 train_batch_size: 256  # Reduced from 512 to avoid OOM
 test_batch_size: 128   # Reduced from 2048 to avoid OOM
-train_source_timesteps: 1000000
-test_source_timesteps: 20000
-train_timesteps: 100000
+train_source_timesteps: 2500
+test_source_timesteps: 2500
+train_timesteps: 50000
 num_warmup_steps: 3000
 learn_var: True
 

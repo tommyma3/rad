@@ -8,12 +8,12 @@ n_stream: 100
 n_process: 25
 
 # PPO parameters
-n_steps: 50            # steps per env before policy update
+n_steps: 100            # steps per env before policy update
 batch_size: 200           # minibatch size for optimization
 n_epochs: 20             # number of epochs per update
 source_lr: 0.0003        # learning rate (slightly lower for stability)
 
-total_source_timesteps: 1000000
+total_source_timesteps: 250000
 
 # Performance options
 use_tensorboard: false   # Set to true to enable TensorBoard logging (slower)

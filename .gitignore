@@ -8,3 +8,5 @@ __pycache__/
 **/accelerate_config.yaml
 **/figures/
 **/plot_eval_rewards.py
+**/*.sh
+**/*.log
