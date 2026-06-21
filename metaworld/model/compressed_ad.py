@@ -121,6 +121,12 @@ class RAD(nn.Module):
         """Get the actual device of the model (works with accelerator)."""
         return next(self.parameters()).device
 
+
+    @property
+    def floating_dtype(self):
+        """Get the current floating point dtype of model parameters."""
+        return next(self.parameters()).dtype
+
     def _get_attention_mask_for_latent(self, seq_len):
         """
         Generate attention mask for sequences with latent prefix.
@@ -458,7 +464,7 @@ class RAD(nn.Module):
         n_envs = vec_env.num_envs
 
         query_states = vec_env.reset()[:, self.obs_dim_idx]
-        query_states = torch.as_tensor(query_states, device=self.device, dtype=torch.float)
+        query_states = torch.as_tensor(query_states, device=self.device, dtype=self.floating_dtype)
         query_states = rearrange(query_states, 'e d -> e 1 d')
         query_states_embed = self.embed_query_state(query_states)
         
@@ -494,10 +500,10 @@ class RAD(nn.Module):
             actions = rearrange(actions, 'e d -> e 1 d')
 
             reward_episode += rewards
-            rewards_tensor = torch.as_tensor(rewards, device=self.device, dtype=torch.float)
+            rewards_tensor = torch.as_tensor(rewards, device=self.device, dtype=self.floating_dtype)
             rewards_tensor = rearrange(rewards_tensor, 'e -> e 1 1')
 
-            query_states = torch.as_tensor(query_states[:, self.obs_dim_idx], device=self.device, dtype=torch.float)
+            query_states = torch.as_tensor(query_states[:, self.obs_dim_idx], device=self.device, dtype=self.floating_dtype)
             query_states = rearrange(query_states, 'e d -> e 1 d')
             
             success += np.array([info['success'] for info in infos])
@@ -509,7 +515,7 @@ class RAD(nn.Module):
                 success = np.zeros(vec_env.num_envs)
 
                 states_next = torch.as_tensor(np.stack([info['terminal_observation'][self.obs_dim_idx] for info in infos]),
-                                              device=self.device, dtype=torch.float)
+                                              device=self.device, dtype=self.floating_dtype)
                 states_next = rearrange(states_next, 'e d -> e 1 d')
             else:
                 states_next = query_states
@@ -560,13 +566,13 @@ class RAD(nn.Module):
     
     def set_obs_space(self, obs_space):
         # Use register_buffer so tensors move with the model
-        self.register_buffer('obs_low', torch.tensor(obs_space.low[:self.config['dim_obs']], requires_grad=False, dtype=torch.float))
-        self.register_buffer('obs_high', torch.tensor(obs_space.high[:self.config['dim_obs']], requires_grad=False, dtype=torch.float))
+        self.register_buffer('obs_low', torch.tensor(obs_space.low[:self.config['dim_obs']], requires_grad=False, dtype=self.floating_dtype))
+        self.register_buffer('obs_high', torch.tensor(obs_space.high[:self.config['dim_obs']], requires_grad=False, dtype=self.floating_dtype))
     
     def set_action_space(self, action_space):
         # Use register_buffer so tensors move with the model
-        self.register_buffer('action_low', torch.tensor(action_space.low, requires_grad=False, dtype=torch.float))
-        self.register_buffer('action_high', torch.tensor(action_space.high, requires_grad=False, dtype=torch.float))
+        self.register_buffer('action_low', torch.tensor(action_space.low, requires_grad=False, dtype=self.floating_dtype))
+        self.register_buffer('action_high', torch.tensor(action_space.high, requires_grad=False, dtype=self.floating_dtype))
         
     def load_pretrained_compression(self, pretrain_checkpoint_path):
         """Load pre-trained compression transformer weights."""
