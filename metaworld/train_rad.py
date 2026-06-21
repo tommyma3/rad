@@ -142,38 +142,6 @@ def get_rad_data_loader(dataset, batch_size, config, shuffle=True, distributed=F
         )
 
 
-def resolve_training_dtype(dtype_name):
-    """Resolve CLI dtype names to torch dtypes."""
-    dtype_name = dtype_name.lower()
-    dtype_map = {
-        "fp32": torch.float32,
-        "float32": torch.float32,
-        "fp16": torch.float16,
-        "float16": torch.float16,
-        "bf16": torch.bfloat16,
-        "bfloat16": torch.bfloat16,
-    }
-    if dtype_name not in dtype_map:
-        raise ValueError(
-            f"Unsupported train dtype: {dtype_name}. "
-            f"Choose from: {', '.join(sorted(dtype_map.keys()))}"
-        )
-    return dtype_map[dtype_name]
-
-
-def cast_floating_tensors(batch, dtype):
-    """Cast only floating tensors in a nested batch, preserving integer metadata."""
-    if isinstance(batch, torch.Tensor):
-        return batch.to(dtype=dtype) if torch.is_floating_point(batch) else batch
-    if isinstance(batch, dict):
-        return {key: cast_floating_tensors(value, dtype) for key, value in batch.items()}
-    if isinstance(batch, list):
-        return [cast_floating_tensors(value, dtype) for value in batch]
-    if isinstance(batch, tuple):
-        return tuple(cast_floating_tensors(value, dtype) for value in batch)
-    return batch
-
-
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--alg-config', '-ac', required=False, default='./config/algorithm/ppo_ml1.yaml', help="Algorithm config")
@@ -189,9 +157,6 @@ def parse_arguments():
                        help='Disable curriculum learning')
     parser.add_argument('--resume', required=False, default=False, help="Resume train", action='store_true')
     parser.add_argument('--mixed-precision', '-m', required=False, default='bf16')
-    parser.add_argument('--train-dtype', default='float32',
-                       choices=['fp32', 'float32', 'fp16', 'float16', 'bf16', 'bfloat16'],
-                       help='Floating point dtype for model parameters and training batches')
     parser.add_argument('--disable-tqdm', '-d', required=False, default=False, action='store_true')
     parser.add_argument('--gradient-accumulation-steps', '-ga', type=int, default=1,
                        help='Number of gradient accumulation steps (effective batch = batch_size * ga_steps * n_gpus)')
@@ -303,8 +268,6 @@ if __name__ == '__main__':
     traj_dir = path.join(args.traj_dir, config['task'])
     config['traj_dir'] = traj_dir
     config['mixed_precision'] = args.mixed_precision
-    config['train_dtype'] = args.train_dtype
-    train_dtype = resolve_training_dtype(args.train_dtype)
 
     # Curriculum settings - load from config or use default
     use_curriculum = not args.no_curriculum
@@ -365,7 +328,6 @@ if __name__ == '__main__':
         print(f'Using Device: {config["device"]}')
         print(f'Number of processes: {accelerator.num_processes}')
         print(f'Mixed precision: {args.mixed_precision}')
-        print(f'Training dtype: {args.train_dtype}')
         print(f'Gradient accumulation steps: {gradient_accumulation_steps}')
         effective_batch = config['train_batch_size'] * accelerator.num_processes * gradient_accumulation_steps
         print(f'Effective batch size: {config["train_batch_size"]} * {accelerator.num_processes} * {gradient_accumulation_steps} = {effective_batch}')
@@ -430,10 +392,6 @@ if __name__ == '__main__':
         elif is_main:
             print('WARNING: No pre-trained compression found. Training from scratch.')
     
-    model.to(dtype=train_dtype)
-    if is_main:
-        print(f'Model parameters cast to {args.train_dtype}', flush=True)
-
     print(f'[Process {accelerator.process_index}] Pre-trained compression loaded.', flush=True)
     
     # Synchronize before data loading
@@ -648,7 +606,7 @@ if __name__ == '__main__':
     # Warm up the dataloader by fetching the first batch
     # This ensures workers are initialized before entering the training loop
     print(f'[Process {accelerator.process_index}] Warming up dataloader...', flush=True)
-    first_batch = cast_floating_tensors(next(train_dataloader), train_dtype)
+    first_batch = next(train_dataloader)
     print(f'[Process {accelerator.process_index}] First batch fetched', flush=True)
     
     # Synchronize all processes before entering training loop
@@ -692,7 +650,6 @@ if __name__ == '__main__':
             else:
                 batch = next(train_dataloader)
             
-            batch = cast_floating_tensors(batch, train_dtype)
             step += 1
             
             # Update curriculum (model max_compressions AND dataset length distribution)
@@ -783,7 +740,6 @@ if __name__ == '__main__':
                     test_cnt = 0
 
                     for j, test_batch in enumerate(test_dataloader):
-                        test_batch = cast_floating_tensors(test_batch, train_dtype)
                         with accelerator.autocast():
                             test_output = model(test_batch)
                         cnt = len(test_batch['states'])
