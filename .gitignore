@@ -10,3 +10,4 @@ __pycache__/
 **/plot_eval_rewards.py
 **/*.sh
 **/*.log
+**/*.txt
