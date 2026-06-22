@@ -72,20 +72,19 @@ class CausalSelfAttention(nn.Module):
                 is_causal=use_causal_mask,
             )
         else:
-            # Fallback path for RAD's custom latent-prefix mask.
-            attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (batch, n_heads, seq_len, seq_len)
-            
-            if use_causal_mask:
-                causal_mask = self.causal_mask[:seq_len, :seq_len]
-                attn = attn.masked_fill(causal_mask, float('-inf'))
-            
+            # RAD masks use True for blocked positions; SDPA boolean masks use True for allowed positions.
+            dropout_p = self.attn_dropout.p if self.training else 0.0
             if attention_mask.dim() == 2:
                 attention_mask = attention_mask.unsqueeze(0).unsqueeze(0)
-            attn = attn.masked_fill(attention_mask, float('-inf'))
-            
-            attn = F.softmax(attn, dim=-1)
-            attn = self.attn_dropout(attn)
-            out = torch.matmul(attn, v)  # (batch, n_heads, seq_len, head_dim)
+            if use_causal_mask:
+                causal_mask = self.causal_mask[:seq_len, :seq_len].unsqueeze(0).unsqueeze(0)
+                attention_mask = attention_mask.logical_or(causal_mask)
+            out = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attention_mask.logical_not(),
+                dropout_p=dropout_p,
+                is_causal=False,
+            )
         out = rearrange(out, 'b h s d -> b s (h d)')
         out = self.out_proj(out)
         out = self.resid_dropout(out)

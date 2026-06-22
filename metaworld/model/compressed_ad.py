@@ -371,12 +371,12 @@ class RAD(nn.Module):
         """
         Training forward pass with automatic compression for long sequences.
         """
-        query_states = x['query_states'].to(self.device)
-        target_actions = x['target_actions'].to(self.device)
-        states = x['states'].to(self.device)
-        actions = x['actions'].to(self.device)
-        next_states = x['next_states'].to(self.device)
-        rewards = x['rewards'].to(self.device)
+        query_states = x['query_states'].to(self.device, non_blocking=True)
+        target_actions = x['target_actions'].to(self.device, non_blocking=True)
+        states = x['states'].to(self.device, non_blocking=True)
+        actions = x['actions'].to(self.device, non_blocking=True)
+        next_states = x['next_states'].to(self.device, non_blocking=True)
+        rewards = x['rewards'].to(self.device, non_blocking=True)
         rewards = rearrange(rewards, 'b n -> b n 1')
 
         # Embed query state
@@ -423,10 +423,10 @@ class RAD(nn.Module):
         Pre-training forward pass for compression transformer only.
         Uses reconstruction loss to learn good compression.
         """
-        states = x['states'].to(self.device)
-        actions = x['actions'].to(self.device)
-        next_states = x['next_states'].to(self.device)
-        rewards = x['rewards'].to(self.device)
+        states = x['states'].to(self.device, non_blocking=True)
+        actions = x['actions'].to(self.device, non_blocking=True)
+        next_states = x['next_states'].to(self.device, non_blocking=True)
+        rewards = x['rewards'].to(self.device, non_blocking=True)
         rewards = rearrange(rewards, 'b n -> b n 1')
 
         # Embed context transitions

@@ -67,9 +67,9 @@ def rad_collate_fn(batch, dim_actions):
     rewards = np.zeros((batch_size, max_context_len), dtype=np.float32)
     next_states = np.zeros((batch_size, max_context_len, dim_state), dtype=np.float32)
     
-    query_states = []
-    target_actions = []
-    context_lengths = []
+    query_states = np.empty((batch_size, dim_state), dtype=np.float32)
+    target_actions = np.empty((batch_size, dim_actions), dtype=np.float32)
+    context_lengths = np.empty(batch_size, dtype=np.int64)
     
     for i, item in enumerate(batch):
         ctx_len = item['states'].shape[0]
@@ -78,18 +78,18 @@ def rad_collate_fn(batch, dim_actions):
         rewards[i, :ctx_len] = item['rewards']
         next_states[i, :ctx_len] = item['next_states']
         
-        query_states.append(item['query_states'])
-        target_actions.append(item['target_actions'])
-        context_lengths.append(ctx_len)
+        query_states[i] = item['query_states']
+        target_actions[i] = item['target_actions']
+        context_lengths[i] = ctx_len
     
     res = {
-        'query_states': torch.tensor(np.array(query_states), requires_grad=False, dtype=torch.float),
-        'target_actions': torch.tensor(np.array(target_actions), requires_grad=False, dtype=torch.float),  # Continuous actions
-        'states': torch.tensor(states, requires_grad=False, dtype=torch.float),
-        'actions': torch.tensor(actions, requires_grad=False, dtype=torch.float),  # Continuous actions
-        'rewards': torch.tensor(rewards, dtype=torch.float, requires_grad=False),
-        'next_states': torch.tensor(next_states, requires_grad=False, dtype=torch.float),
-        'context_lengths': torch.tensor(context_lengths, dtype=torch.long),  # For masking
+        'query_states': torch.from_numpy(query_states),
+        'target_actions': torch.from_numpy(target_actions),  # Continuous actions
+        'states': torch.from_numpy(states),
+        'actions': torch.from_numpy(actions),  # Continuous actions
+        'rewards': torch.from_numpy(rewards),
+        'next_states': torch.from_numpy(next_states),
+        'context_lengths': torch.from_numpy(context_lengths),  # For masking
     }
     
     return res
@@ -111,8 +111,9 @@ def get_rad_data_loader(dataset, batch_size, config, shuffle=True, distributed=F
     
     collate_fn = partial(rad_collate_fn, dim_actions=config['dim_actions'])
     
-    # Use num_workers=0 to avoid distributed deadlocks (safer with Accelerate)
-    num_workers = 0 if distributed else config.get('num_workers', 0)
+    num_workers = config.get('num_workers', 0)
+    pin_memory = torch.cuda.is_available()
+    persistent_workers = num_workers > 0
     
     if use_length_grouping:
         # Use length-grouped sampler to reduce padding
@@ -127,8 +128,8 @@ def get_rad_data_loader(dataset, batch_size, config, shuffle=True, distributed=F
             batch_sampler=sampler,
             collate_fn=collate_fn, 
             num_workers=num_workers, 
-            persistent_workers=False,
-            pin_memory=False,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
         )
     else:
         return DataLoader(
@@ -137,8 +138,8 @@ def get_rad_data_loader(dataset, batch_size, config, shuffle=True, distributed=F
             shuffle=shuffle, 
             collate_fn=collate_fn, 
             num_workers=num_workers, 
-            persistent_workers=False,
-            pin_memory=False,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
         )
 
 
@@ -469,12 +470,19 @@ if __name__ == '__main__':
     print(f'[Process {accelerator.process_index}] Creating optimizer...', flush=True)
     
     # Optimizer for all parameters
-    optimizer = AdamW(
-        model.parameters(), 
-        lr=config['lr'], 
-        betas=(config['beta1'], config['beta2']), 
-        weight_decay=config['weight_decay']
+    optimizer_kwargs = dict(
+        lr=config['lr'],
+        betas=(config['beta1'], config['beta2']),
+        weight_decay=config['weight_decay'],
     )
+    if torch.cuda.is_available():
+        optimizer_kwargs['fused'] = True
+    try:
+        optimizer = AdamW(model.parameters(), **optimizer_kwargs)
+    except (TypeError, RuntimeError):
+        optimizer_kwargs.pop('fused', None)
+        optimizer_kwargs['foreach'] = torch.cuda.is_available()
+        optimizer = AdamW(model.parameters(), **optimizer_kwargs)
     
     print(f'[Process {accelerator.process_index}] Optimizer created. Creating LR scheduler...', flush=True)
     
@@ -639,6 +647,8 @@ if __name__ == '__main__':
     # Use the pre-fetched first_batch for step 1 if starting from scratch
     use_prefetched_batch = (step == 0)
     
+    progress_interval = config.get('progress_interval', 10)
+
     with tqdm(total=config['train_timesteps'], position=0, leave=True, disable=not is_main or args.disable_tqdm) as pbar:
         pbar.update(step)
 
@@ -652,16 +662,13 @@ if __name__ == '__main__':
             
             step += 1
             
-            # Update curriculum (model max_compressions AND dataset length distribution)
+            # Update curriculum only at stage transitions.
             if use_curriculum:
-                max_comp = get_curriculum_max_compressions(step, curriculum)
-                unwrapped = accelerator.unwrap_model(model)
-                unwrapped.set_curriculum(max_comp)
-                
-                # Check if curriculum stage changed - update dataset length distribution
                 new_stage = get_curriculum_stage(step, curriculum)
                 if new_stage != current_curriculum_stage:
                     current_curriculum_stage = new_stage
+                    max_comp = get_curriculum_max_compressions(step, curriculum)
+                    accelerator.unwrap_model(model).set_curriculum(max_comp)
                     new_length_dist = get_curriculum_length_distribution(step, curriculum)
                     train_dataset.update_length_distribution(new_length_dist)
                     if is_main:
@@ -684,7 +691,7 @@ if __name__ == '__main__':
                     accelerator.clip_grad_norm_(model.parameters(), 1.0)
                 
                 optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
                 if accelerator.sync_gradients and not accelerator.optimizer_step_was_skipped:
                     lr_sched.step()
@@ -695,18 +702,17 @@ if __name__ == '__main__':
                 compression_counts.pop(0)
 
             avg_compressions = np.mean(compression_counts) if compression_counts else 0
-            
-            # Get batch context length info
-            ctx_lens = batch['context_lengths']
-            max_ctx = ctx_lens.max().item()
-            mean_ctx = ctx_lens.float().mean().item()
-            
-            pbar.set_postfix(
-                loss=loss.item(), 
-                n_comp=output['num_compressions'],
-                avg_comp=f'{avg_compressions:.2f}',
-                ctx_len=f'{mean_ctx:.0f}/{max_ctx}'
-            )
+
+            if is_main and not args.disable_tqdm and step % progress_interval == 0:
+                ctx_lens = batch['context_lengths']
+                max_ctx = ctx_lens.max().item()
+                mean_ctx = ctx_lens.float().mean().item()
+                pbar.set_postfix(
+                    loss=loss.detach().float().item(),
+                    n_comp=output['num_compressions'],
+                    avg_comp=f'{avg_compressions:.2f}',
+                    ctx_len=f'{mean_ctx:.0f}/{max_ctx}'
+                )
 
             # Logging
             if is_main and step % config['summary_interval'] == 0:

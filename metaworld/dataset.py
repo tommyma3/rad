@@ -146,9 +146,7 @@ class LengthGroupedSampler(Sampler[List[int]]):
             random.shuffle(all_batches)
         
         for category, batch in all_batches:
-            # Tell dataset which category this batch is from
-            self.dataset._current_batch_category = category
-            yield batch
+            yield [(idx, category) for idx in batch]
     
     def __len__(self) -> int:
         if self.drop_last:
@@ -223,7 +221,7 @@ class RADDataset(Dataset):
         self.seq_length = self.states.shape[1]
         self.n_histories = self.states.shape[0]
         
-        # For grouped batching
+        # For backwards compatibility with old single-process samplers.
         self._current_batch_category = None
     
     def _validate_distribution(self, dist):
@@ -305,12 +303,17 @@ class RADDataset(Dataset):
         return random.randint(low, high)
 
     def __getitem__(self, i):
+        if isinstance(i, tuple):
+            i, category = i
+        else:
+            category = self._current_batch_category
+
         # Use index for reproducibility but also allow randomness
         history_idx = i % self.n_histories
         
         # Sample context length - use category if set by LengthGroupedSampler
-        if self._current_batch_category is not None:
-            context_length = self._sample_context_length_for_category(self._current_batch_category)
+        if category is not None:
+            context_length = self._sample_context_length_for_category(category)
         else:
             context_length = self._sample_context_length()
         
