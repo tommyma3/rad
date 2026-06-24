@@ -34,7 +34,7 @@ from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import RADDataset, ADDataset
-from env import make_env
+from env import get_ml1_test_env_fns
 from model import MODEL
 from utils import get_config, next_dataloader, get_curriculum_aware_scheduler, log_in_context
 from transformers import get_cosine_schedule_with_warmup
@@ -42,7 +42,6 @@ from transformers import get_cosine_schedule_with_warmup
 import multiprocessing
 from tqdm import tqdm
 from stable_baselines3.common.vec_env import DummyVecEnv
-import metaworld
 
 import numpy as np
 import torch.nn.functional as F
@@ -531,21 +530,16 @@ if __name__ == '__main__':
     print(f'[Process {accelerator.process_index}] After environment setup barrier', flush=True)
     
     eval_envs = None
-    n_test_envs = config.get('n_test_envs_per_task', 50)  # Default for non-main processes
+    n_test_envs = 10  # Default for non-main processes
     
     if is_main:
         print(f'Initializing Meta-world ML1 benchmark...', flush=True)
-        ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
-        
-        test_envs = []
-        
-        for task_name, env_cls in ml1.test_classes.items():
-            task_instances = [task for task in ml1.test_tasks if task.env_name == task_name]
-            for task_instance in task_instances:
-                test_envs.append(make_env(config, env_cls, task_instance))
-
+        max_test_envs = 10
+        test_envs = get_ml1_test_env_fns(config, max_envs_per_task=max_test_envs)
         envs = test_envs
         n_test_envs = len(test_envs)
+        print(f'Using {n_test_envs} test environments for training in-context evaluation '
+              f'(cap={max_test_envs} per task).', flush=True)
         
         # Use DummyVecEnv to avoid multiprocessing conflicts
         # with Accelerate's distributed training on Windows

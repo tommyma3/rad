@@ -17,9 +17,8 @@ sys.path.append(os.path.dirname(sys.path[0]))
 import torch
 import os.path as path
 import numpy as np
-import metaworld
 
-from env import make_env
+from env import get_ml1_test_env_fns
 from model import MODEL
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -89,12 +88,7 @@ if __name__ == '__main__':
     print(f"Max sequence length: {config['n_transit']}")
     print(f"Compression tokens: {config.get('n_compress_tokens', 'N/A')}")
 
-    ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
-    test_envs = []
-    for task_name, env_cls in ml1.test_classes.items():
-        task_instances = [task for task in ml1.test_tasks if task.env_name == task_name]
-        for task_instance in task_instances:
-            test_envs.append(make_env(config, env_cls, task_instance))
+    test_envs = get_ml1_test_env_fns(config, max_envs_per_task=None)
 
     envs = DummyVecEnv(test_envs)
     model.set_obs_space(envs.observation_space)

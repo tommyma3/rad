@@ -14,6 +14,28 @@ def make_env(config, env_cls, task):
     return _init
 
 
+def get_ml1_test_env_fns(config, max_envs_per_task=None):
+    """
+    Create ML1 test environment factory functions.
+
+    Args:
+        config: Experiment config.
+        max_envs_per_task: Optional cap per ML1 test task class. None uses all
+            available test task instances.
+    """
+    ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
+    test_envs = []
+
+    for task_name, env_cls in ml1.test_classes.items():
+        task_instances = [t for t in ml1.test_tasks if t.env_name == task_name]
+        if max_envs_per_task is not None:
+            task_instances = task_instances[:max_envs_per_task]
+        for task_instance in task_instances:
+            test_envs.append(make_env(config, env_cls, task_instance))
+
+    return test_envs
+
+
 def get_ml1_envs(config):
     """
     Get ML1 train and test environment instances.

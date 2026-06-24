@@ -66,8 +66,8 @@ curriculum_schedule:
 lr: 0.001
 train_batch_size: 128
 test_batch_size: 256
-train_source_timesteps: 2500
-test_source_timesteps: 2500
+train_source_timesteps: 8000
+test_source_timesteps: 8000
 train_timesteps: 100000
 num_warmup_steps: 1000
 

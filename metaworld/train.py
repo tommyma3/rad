@@ -28,7 +28,7 @@ from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import ADDataset
-from env import SAMPLE_ENVIRONMENT, make_env
+from env import SAMPLE_ENVIRONMENT, get_ml1_test_env_fns
 from model import MODEL
 from utils import get_config, get_data_loader, log_in_context, next_dataloader
 from transformers import get_cosine_schedule_with_warmup
@@ -199,13 +199,10 @@ if __name__ == '__main__':
     test_envs = []
     
     if is_main:
-        ml1 = metaworld.ML1(env_name=config['task'], seed=config['mw_seed'])
-        
-        for task_name, env_cls in ml1.test_classes.items():
-            task_instances = [task for task in ml1.test_tasks if task.env_name == task_name]
-            for task_instance in task_instances:
-                test_envs.append(make_env(config, env_cls, task_instance))
-
+        max_test_envs = 10
+        test_envs = get_ml1_test_env_fns(config, max_envs_per_task=max_test_envs)
+        print(f'Using {len(test_envs)} test environments for training in-context evaluation '
+              f'(cap={max_test_envs} per task).')
         envs = DummyVecEnv(test_envs)
         
     # Set observation/action space on all processes (needed for model)
