@@ -119,6 +119,7 @@ if __name__ == '__main__':
         total_compressions = eval_output.get('total_compressions', 0)
         compression_events = eval_output.get('compression_events', [])
         result_path = path.join(ckpt_dir, 'eval_result.npy')
+        success_result_path = path.join(ckpt_dir, 'eval_success.npy')
     
     end_time = datetime.now()
     print()
@@ -130,6 +131,9 @@ if __name__ == '__main__':
     # Save full results
     with open(result_path, 'wb') as f:
         np.save(f, eval_output['reward_episode'])
+    if test_success is not None:
+        with open(success_result_path, 'wb') as f:
+            np.save(f, test_success)
 
     print(f'\nResults saved to {result_path}')
 

@@ -90,6 +90,7 @@ if __name__ == '__main__':
             test_success = None
         
         save_path = path.join(ckpt_dir, 'eval_result.npy')
+        success_save_path = path.join(ckpt_dir, 'eval_success.npy')
     
     end_time = datetime.now()
     print()
@@ -101,6 +102,9 @@ if __name__ == '__main__':
     # Save full results
     with open(save_path, 'wb') as f:
         np.save(f, output['reward_episode'])
+    if test_success is not None:
+        with open(success_save_path, 'wb') as f:
+            np.save(f, test_success)
 
     print(f'\nResults saved to {save_path}')
 
