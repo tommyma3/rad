@@ -176,6 +176,9 @@ class RAD(nn.Module):
 
     def _compress_sequence(self, context_embed, compression_round):
         latent_tokens = self.compression_transformer(context_embed)
+        # Compiled CUDAGraph outputs can be overwritten by later compiled
+        # invocations; latent memory is kept across compression rounds.
+        latent_tokens = latent_tokens.clone()
         if compression_round >= self.max_gradient_rounds:
             latent_tokens = latent_tokens.detach()
         return latent_tokens

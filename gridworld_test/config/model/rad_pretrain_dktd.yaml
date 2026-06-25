@@ -9,10 +9,10 @@ tf_n_head: 4            # Match rad_dktd.yaml
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128         # Match rad_dktd.yaml
-n_transit: 120          # 120 environment timesteps = 360 transformer tokens
+n_transit: 50          # 120 environment timesteps = 360 transformer tokens
 
 # Compression Settings (must match rad_dktd.yaml)
-n_compress_tokens: 48   # Must be a multiple of 3 for s/a/r token consistency
+n_compress_tokens: 30   # Must be a multiple of 3 for s/a/r token consistency
 always_use_latent_prefix: True
 compress_n_layers: 4    # Match rad_dktd.yaml
 compress_n_heads: 4     # Match rad_dktd.yaml
@@ -24,8 +24,8 @@ pretrain_lr: 0.0003
 pretrain_warmup_steps: 2000
 
 # Dataset
-max_context_length: 1500
-train_source_timesteps: 2000  # Match fine-tuning config
+max_context_length: 1000
+train_source_timesteps: 1000  # Match fine-tuning config
 train_n_stream: 100
 
 num_workers: 16

@@ -76,7 +76,7 @@ curriculum_schedule:
 
 # Training
 lr: 0.0003          # Can use higher LR for smaller model
-train_batch_size: 128 # Can use larger batch with smaller model
+train_batch_size: 256 # Can use larger batch with smaller model
 test_batch_size: 256
 train_source_timesteps: 1000
 train_timesteps: 100000
@@ -94,7 +94,7 @@ early_stopping_patience: 10  # Number of gen_intervals without improvement befor
 progress_interval: 50
 eval_num_train_envs: 4
 eval_num_test_envs: 4
-in_context_eval_episodes: 20
+in_context_eval_episodes: 100
 
 # Compile tensor-heavy submodules while leaving RAD recurrence eager.
 torch_compile: True

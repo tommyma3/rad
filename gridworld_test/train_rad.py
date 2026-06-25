@@ -47,6 +47,22 @@ import torch.nn.functional as F
 from functools import partial
 
 
+def configure_torch_runtime(config):
+    matmul_precision = config.get('float32_matmul_precision', 'high')
+    if matmul_precision:
+        torch.set_float32_matmul_precision(matmul_precision)
+        config['float32_matmul_precision'] = matmul_precision
+
+    if config.get('torch_compile', False) and config.get('torch_compile_cudagraph_skip_dynamic_graphs', True):
+        try:
+            import importlib
+            inductor_config = importlib.import_module('torch._inductor.config')
+            inductor_config.triton.cudagraph_skip_dynamic_graphs = True
+            config['torch_compile_cudagraph_skip_dynamic_graphs'] = True
+        except Exception:
+            pass
+
+
 def rad_collate_fn(batch, grid_size, num_actions=5):
     """
     Collate function for variable-length RAD dataset.
@@ -309,6 +325,7 @@ if __name__ == '__main__':
     config['log_dir'] = log_dir
     config['traj_dir'] = './datasets'
     config['mixed_precision'] = 'fp16'
+    configure_torch_runtime(config)
     progress_interval = max(1, int(config.get('progress_interval', 50)))
     in_context_eval_episodes = max(1, int(config.get('in_context_eval_episodes', 100)))
 
