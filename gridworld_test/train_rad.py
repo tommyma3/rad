@@ -183,6 +183,68 @@ def get_curriculum_stage(step, curriculum):
     return stage
 
 
+def normalize_compiled_state_dict(state_dict):
+    """Map torch.compile wrapper keys back to the uncompiled checkpoint format."""
+    return {
+        key.replace('._orig_mod.', '.').removeprefix('_orig_mod.'): value
+        for key, value in state_dict.items()
+    }
+
+
+def checkpoint_state_dict(model):
+    """Return a state dict that can be loaded with or without torch.compile."""
+    return normalize_compiled_state_dict(model.state_dict())
+
+
+def maybe_compile_model(model, config, is_main):
+    """Compile tensor-heavy RAD submodules while leaving Python recurrence eager."""
+    if not config.get('torch_compile', False):
+        return model
+
+    if not hasattr(torch, 'compile'):
+        if is_main:
+            print('WARNING: torch.compile requested but unavailable in this PyTorch build.')
+        return model
+
+    if config.get('torch_compile_suppress_errors', True):
+        try:
+            import importlib
+            dynamo = importlib.import_module('torch._dynamo')
+            dynamo.config.suppress_errors = True
+        except Exception as exc:
+            if is_main:
+                print(f'WARNING: Unable to set torch._dynamo suppress_errors: {exc}')
+
+    compile_kwargs = {
+        'mode': config.get('torch_compile_mode', 'reduce-overhead'),
+        'fullgraph': bool(config.get('torch_compile_fullgraph', False)),
+        'dynamic': bool(config.get('torch_compile_dynamic', True)),
+    }
+    backend = config.get('torch_compile_backend')
+    if backend:
+        compile_kwargs['backend'] = backend
+
+    module_names = config.get(
+        'torch_compile_modules',
+        ['ad_transformer', 'compression_transformer'],
+    )
+    compiled_modules = []
+    for module_name in module_names:
+        if not hasattr(model, module_name):
+            if is_main:
+                print(f'WARNING: Cannot torch.compile missing module: {module_name}')
+            continue
+        module = getattr(model, module_name)
+        setattr(model, module_name, torch.compile(module, **compile_kwargs))
+        compiled_modules.append(module_name)
+
+    if is_main:
+        print(f'torch.compile enabled for: {compiled_modules}')
+        print(f'torch.compile kwargs: {compile_kwargs}')
+
+    return model
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--pretrain_ckpt', type=str, default=None,
@@ -281,6 +343,19 @@ if __name__ == '__main__':
         elif is_main:
             print('WARNING: No pre-trained compression found. Training from scratch.')
 
+    step = 0
+    resume_ckpt = None
+    ckpt_paths = sorted(glob(path.join(config['log_dir'], 'ckpt-*.pt')))
+    if len(ckpt_paths) > 0:
+        ckpt_path = ckpt_paths[-1]
+        resume_ckpt = torch.load(ckpt_path, map_location=config['device'])
+        model.load_state_dict(normalize_compiled_state_dict(resume_ckpt['model']))
+        step = resume_ckpt['step']
+        if is_main:
+            print(f'Model checkpoint loaded from {ckpt_path}')
+
+    model = maybe_compile_model(model, config, is_main)
+
     if is_main:
         load_start_time = datetime.now()
         print(f'Data loading started at {load_start_time}')
@@ -363,20 +438,12 @@ if __name__ == '__main__':
         )
         if is_main:
             print(f'Using standard cosine LR scheduler')
-    
-    step = 0
 
-    # Load checkpoint if exists
-    ckpt_paths = sorted(glob(path.join(config['log_dir'], 'ckpt-*.pt')))
-    if len(ckpt_paths) > 0:
-        ckpt_path = ckpt_paths[-1]
-        ckpt = torch.load(ckpt_path, map_location=config['device'])
-        model.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
-        lr_sched.load_state_dict(ckpt['lr_sched'])
-        step = ckpt['step']
+    if resume_ckpt is not None:
+        optimizer.load_state_dict(resume_ckpt['optimizer'])
+        lr_sched.load_state_dict(resume_ckpt['lr_sched'])
         if is_main:
-            print(f'Checkpoint loaded from {ckpt_path}')
+            print(f'Optimizer and scheduler checkpoint loaded at step {step}')
 
     # Setup evaluation environments
     env_name = config['env']
@@ -560,7 +627,7 @@ if __name__ == '__main__':
                         torch.save({
                             'step': step,
                             'config': config,
-                            'model': unwrapped.state_dict(),
+                            'model': checkpoint_state_dict(unwrapped),
                             'optimizer': optimizer.state_dict(),
                             'lr_sched': lr_sched.state_dict(),
                             'eval_reward': mean_reward,
@@ -596,7 +663,7 @@ if __name__ == '__main__':
                 torch.save({
                     'step': step,
                     'config': config,
-                    'model': unwrapped_model.state_dict(),
+                    'model': checkpoint_state_dict(unwrapped_model),
                     'optimizer': optimizer.state_dict(),
                     'lr_sched': lr_sched.state_dict(),
                 }, new_ckpt_path)

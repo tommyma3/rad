@@ -83,4 +83,14 @@ eval_num_train_envs: 4
 eval_num_test_envs: 4
 in_context_eval_episodes: 20
 
+# Compile tensor-heavy submodules while leaving RAD recurrence eager.
+torch_compile: True
+torch_compile_modules:
+  - ad_transformer
+  - compression_transformer
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
+
 num_workers: 4
