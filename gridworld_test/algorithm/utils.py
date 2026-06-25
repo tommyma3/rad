@@ -46,10 +46,19 @@ class HistoryLoggerCallback(BaseCallback):
         self.next_states.append(next_obs)
         self.actions.append(self.locals["actions"])
 
-        self.rewards.append(self.locals["rewards"].copy())
+        rewards = self.locals["rewards"].copy()
+        infos = self.locals.get("infos")
+        if infos is not None:
+            true_rewards = [
+                info.get("true_reward", rewards[i])
+                for i, info in enumerate(infos)
+            ]
+            rewards = np.array(true_rewards, dtype=rewards.dtype)
+
+        self.rewards.append(rewards)
         self.dones.append(self.locals["dones"])
 
-        self.episode_rewards.append(self.locals['rewards'])
+        self.episode_rewards.append(rewards)
         
         if self.locals['dones'][0]:
             mean_reward = np.mean(np.mean(self.episode_rewards, axis=0))

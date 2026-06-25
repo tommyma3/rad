@@ -1,0 +1,7 @@
+include: config/algorithm/ppo_dark_key_to_door.yaml
+
+alg: PPOOptimistic
+optimistic_exploration: true
+optimistic_bonus_coef: 1.0
+optimistic_count_key: full_state
+max_collect_envs: 200

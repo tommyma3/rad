@@ -40,3 +40,9 @@ class PPOWrapper(PPO):
             device=device,
             tensorboard_log=log_dir,
         )
+
+
+class PPOOptimisticWrapper(PPOWrapper):
+    """PPO trained with optimistic exploration rewards from env wrappers."""
+
+    pass
