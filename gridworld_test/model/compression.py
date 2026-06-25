@@ -31,7 +31,6 @@ class CrossAttentionLayer(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         
         self.dropout = nn.Dropout(dropout)
-        self.scale = self.head_dim ** -0.5
         
     def forward(self, queries, context):
         """
@@ -43,8 +42,6 @@ class CrossAttentionLayer(nn.Module):
             output: (batch, n_queries, d_model)
         """
         batch_size, n_queries, _ = queries.shape
-        context_len = context.shape[1]
-        
         # Project queries, keys, values
         q = self.q_proj(queries)  # (batch, n_queries, d_model)
         k = self.k_proj(context)  # (batch, context_len, d_model)
@@ -55,13 +52,14 @@ class CrossAttentionLayer(nn.Module):
         k = rearrange(k, 'b s (h d) -> b h s d', h=self.n_heads)
         v = rearrange(v, 'b s (h d) -> b h s d', h=self.n_heads)
         
-        # Compute attention scores
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (batch, heads, n_queries, context_len)
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-        
-        # Apply attention to values
-        out = torch.matmul(attn, v)  # (batch, heads, n_queries, head_dim)
+        dropout_p = self.dropout.p if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            dropout_p=dropout_p,
+            is_causal=False,
+        )
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.out_proj(out)
         

@@ -62,7 +62,6 @@ def rad_collate_fn(batch, grid_size, num_actions=5):
     states = np.zeros((batch_size, max_context_len, dim_state), dtype=np.float32)
     actions = np.zeros((batch_size, max_context_len), dtype=np.int64)
     rewards = np.zeros((batch_size, max_context_len), dtype=np.float32)
-    next_states = np.zeros((batch_size, max_context_len, dim_state), dtype=np.float32)
     
     context_lengths = []
     
@@ -71,7 +70,6 @@ def rad_collate_fn(batch, grid_size, num_actions=5):
         states[i, :ctx_len] = item['states']
         actions[i, :ctx_len] = item['actions']
         rewards[i, :ctx_len] = item['rewards']
-        next_states[i, :ctx_len] = item['next_states']
         
         context_lengths.append(ctx_len)
     
@@ -79,7 +77,6 @@ def rad_collate_fn(batch, grid_size, num_actions=5):
         'states': torch.tensor(states, requires_grad=False, dtype=torch.float),
         'actions': F.one_hot(torch.tensor(actions, requires_grad=False, dtype=torch.long), num_classes=num_actions),
         'rewards': torch.tensor(rewards, dtype=torch.float, requires_grad=False),
-        'next_states': torch.tensor(next_states, requires_grad=False, dtype=torch.float),
         'context_lengths': torch.tensor(context_lengths, dtype=torch.long),  # For masking
     }
     
@@ -231,6 +228,8 @@ if __name__ == '__main__':
     config['log_dir'] = log_dir
     config['traj_dir'] = './datasets'
     config['mixed_precision'] = 'fp16'
+    progress_interval = max(1, int(config.get('progress_interval', 50)))
+    in_context_eval_episodes = max(1, int(config.get('in_context_eval_episodes', 100)))
 
     # Curriculum settings - load from config or use default
     use_curriculum = not args.no_curriculum
@@ -382,9 +381,13 @@ if __name__ == '__main__':
     # Setup evaluation environments
     env_name = config['env']
     train_env_args, test_env_args = SAMPLE_ENVIRONMENT[env_name](config)
-    train_env_args = train_env_args[:10]
-    test_env_args = test_env_args[:10]
+    eval_num_train_envs = int(config.get('eval_num_train_envs', 10))
+    eval_num_test_envs = int(config.get('eval_num_test_envs', 10))
+    train_env_args = train_env_args[:eval_num_train_envs]
+    test_env_args = test_env_args[:eval_num_test_envs]
     env_args = train_env_args + test_env_args    
+    if len(env_args) == 0:
+        raise ValueError('At least one in-context evaluation environment is required')
 
     if env_name == "darkroom":
         envs = DummyVecEnv([make_env(config, goal=arg) for arg in env_args])
@@ -426,14 +429,12 @@ if __name__ == '__main__':
             
             # Update curriculum (model max_compressions AND dataset length distribution)
             if use_curriculum:
-                max_comp = get_curriculum_max_compressions(step, curriculum)
-                unwrapped = accelerator.unwrap_model(model)
-                unwrapped.set_curriculum(max_comp)
-                
                 # Check if curriculum stage changed - update dataset length distribution
                 new_stage = get_curriculum_stage(step, curriculum)
                 if new_stage != current_curriculum_stage:
                     current_curriculum_stage = new_stage
+                    max_comp = get_curriculum_max_compressions(step, curriculum)
+                    accelerator.unwrap_model(model).set_curriculum(max_comp)
                     new_length_dist = get_curriculum_length_distribution(step, curriculum)
                     train_dataset.update_length_distribution(new_length_dist)
                     if is_main:
@@ -451,7 +452,7 @@ if __name__ == '__main__':
             if len(compression_counts) > 1000:
                 compression_counts.pop(0)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -460,12 +461,13 @@ if __name__ == '__main__':
                 lr_sched.step()
 
             avg_compressions = np.mean(compression_counts) if compression_counts else 0
-            pbar.set_postfix(
-                loss=loss.item(), 
-                acc=output['acc_action'].item(),
-                n_comp=output['num_compressions'],
-                avg_comp=f'{avg_compressions:.2f}'
-            )
+            if is_main and (step == 1 or step % progress_interval == 0 or step == config['train_timesteps']):
+                pbar.set_postfix(
+                    loss=loss.detach().float().item(),
+                    acc=output['acc_action'].detach().float().item(),
+                    n_comp=output['num_compressions'],
+                    avg_comp=f'{avg_compressions:.2f}',
+                )
 
             # Logging
             if is_main and step % config['summary_interval'] == 0:
@@ -530,7 +532,7 @@ if __name__ == '__main__':
                     unwrapped = accelerator.unwrap_model(model)
                     eval_output = unwrapped.evaluate_in_context(
                         vec_env=envs, 
-                        eval_timesteps=config['horizon'] * 100
+                        eval_timesteps=config['horizon'] * in_context_eval_episodes
                     )
                     
                     mean_reward = eval_output['reward_episode'].mean()

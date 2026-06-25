@@ -224,7 +224,7 @@ class RADDataset(Dataset):
         states = []
         actions = []
         rewards = []
-        next_states = []
+        next_states = [] if self.dynamics else None
 
         with h5py.File(f'{traj_dir}/{get_traj_file_name(config)}.hdf5', 'r') as f:
             for i in env_idx:
@@ -234,12 +234,13 @@ class RADDataset(Dataset):
                 states.append(grp['states'][()].transpose(1, 0, 2)[:n_stream, :source_timesteps])
                 actions.append(grp['actions'][()].transpose(1, 0)[:n_stream, :source_timesteps])
                 rewards.append(grp['rewards'][()].transpose(1, 0)[:n_stream, :source_timesteps])
-                next_states.append(grp['next_states'][()].transpose(1, 0, 2)[:n_stream, :source_timesteps])
+                if self.dynamics:
+                    next_states.append(grp['next_states'][()].transpose(1, 0, 2)[:n_stream, :source_timesteps])
                     
         self.states = np.concatenate(states, axis=0)
         self.actions = np.concatenate(actions, axis=0)
         self.rewards = np.concatenate(rewards, axis=0)
-        self.next_states = np.concatenate(next_states, axis=0)
+        self.next_states = np.concatenate(next_states, axis=0) if self.dynamics else None
         
         self.seq_length = self.states.shape[1]
         self.n_histories = self.states.shape[0]
@@ -359,7 +360,6 @@ class RADDataset(Dataset):
             'states': self.states[history_idx, start_idx:end_idx],
             'actions': self.actions[history_idx, start_idx:end_idx],
             'rewards': self.rewards[history_idx, start_idx:end_idx],
-            'next_states': self.next_states[history_idx, start_idx:end_idx],
             'context_length': context_length,  # For logging/debugging
         }
         

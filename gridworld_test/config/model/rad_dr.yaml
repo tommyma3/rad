@@ -10,7 +10,7 @@ tf_n_head: 4
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128         # 2x embedding dim
-gradient_checkpointing: True
+gradient_checkpointing: False
 n_transit: 40           # 40 environment timesteps = 120 transformer tokens
 
 # Compression Settings - compact latent representation
@@ -86,5 +86,11 @@ min_lr_ratio: 0.1         # Minimum LR as ratio of base LR (10% of base)
 # Best model tracking
 save_best_model: True
 early_stopping_patience: 10  # Number of gen_intervals without improvement before warning
+
+# Speed-oriented diagnostics/evaluation defaults
+progress_interval: 50
+eval_num_train_envs: 4
+eval_num_test_envs: 4
+in_context_eval_episodes: 20
 
 num_workers: 4
