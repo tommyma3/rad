@@ -17,10 +17,10 @@ compress_n_layers: 3    # Match rad_dr.yaml
 compress_n_heads: 4     # Match rad_dr.yaml
 
 # Pre-training specific
-pretrain_timesteps: 35000   # Smaller model needs less pretraining
+pretrain_timesteps: 40000   # Smaller model needs less pretraining
 pretrain_batch_size: 512    # Larger batch for smaller model
 pretrain_lr: 0.0003
-pretrain_warmup_steps: 1000
+pretrain_warmup_steps: 3000
 
 # Dataset
 max_context_length: 1000
