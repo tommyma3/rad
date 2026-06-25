@@ -349,10 +349,17 @@ if __name__ == '__main__':
     if len(ckpt_paths) > 0:
         ckpt_path = ckpt_paths[-1]
         resume_ckpt = torch.load(ckpt_path, map_location=config['device'])
-        model.load_state_dict(normalize_compiled_state_dict(resume_ckpt['model']))
+        load_result = model.load_state_dict(
+            normalize_compiled_state_dict(resume_ckpt['model']),
+            strict=False,
+        )
         step = resume_ckpt['step']
         if is_main:
             print(f'Model checkpoint loaded from {ckpt_path}')
+            if load_result.missing_keys:
+                print(f'Missing model keys initialized from current config: {load_result.missing_keys}')
+            if load_result.unexpected_keys:
+                print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
 
     model = maybe_compile_model(model, config, is_main)
 
@@ -440,10 +447,17 @@ if __name__ == '__main__':
             print(f'Using standard cosine LR scheduler')
 
     if resume_ckpt is not None:
-        optimizer.load_state_dict(resume_ckpt['optimizer'])
-        lr_sched.load_state_dict(resume_ckpt['lr_sched'])
+        try:
+            optimizer.load_state_dict(resume_ckpt['optimizer'])
+            lr_sched.load_state_dict(resume_ckpt['lr_sched'])
+            optimizer_state_loaded = True
+        except ValueError as exc:
+            optimizer_state_loaded = False
         if is_main:
-            print(f'Optimizer and scheduler checkpoint loaded at step {step}')
+            if optimizer_state_loaded:
+                print(f'Optimizer and scheduler checkpoint loaded at step {step}')
+            else:
+                print(f'WARNING: Optimizer/scheduler checkpoint incompatible, reinitializing them: {exc}')
 
     # Setup evaluation environments
     env_name = config['env']

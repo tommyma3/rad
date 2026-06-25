@@ -15,6 +15,7 @@ n_transit: 40           # 40 environment timesteps = 120 transformer tokens
 
 # Compression Settings - compact latent representation
 n_compress_tokens: 15   # Must be a multiple of 3 for s/a/r token consistency
+always_use_latent_prefix: True
 short_memory_keep: 5   # Recent uncompressed environment timesteps kept after compression
 compress_n_layers: 3
 compress_n_heads: 4
@@ -26,9 +27,10 @@ max_gradient_rounds: 3
 max_compressions: null
 
 # Dataset settings
-# With n_transit=40, compression triggers after the 40-timestep token budget is exceeded.
+# With always_use_latent_prefix=True, 15 latent slots are reserved first.
+# Compression triggers after roughly 35 recent environment timesteps.
 # Length categories adjusted accordingly:
-#   short: 20-50 (no compression needed)
+#   short: 20-50 (20-35 no compression, longer short windows compress)
 #   medium: 60-150 (1-2 compressions)
 #   long: 200-400 (3-8 compressions)
 #   very_long: 500-1000 (10+ compressions)

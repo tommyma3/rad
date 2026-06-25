@@ -44,6 +44,7 @@ class RAD(nn.Module):
         self.max_gradient_rounds = config.get('max_gradient_rounds', 2)
         self.max_compressions = config.get('max_compressions', None)
         self.max_context_tokens = 3 * config.get('max_context_length', self.n_transit)
+        self.always_use_latent_prefix = config.get('always_use_latent_prefix', False)
 
         tf_n_embd = config['tf_n_embd']
         tf_n_head = config.get('tf_n_head', 4)
@@ -67,6 +68,7 @@ class RAD(nn.Module):
         self.embed_reward = nn.Linear(1, tf_n_embd)
         self.type_embedding = nn.Parameter(torch.zeros(1, 1, 3, tf_n_embd))
         self.latent_type_embedding = nn.Parameter(torch.zeros(1, 1, tf_n_embd))
+        self.null_latent_tokens = nn.Parameter(torch.zeros(1, self.n_compress_tokens, tf_n_embd))
 
         self.pred_action = nn.Linear(tf_n_embd, self.num_actions)
 
@@ -90,6 +92,7 @@ class RAD(nn.Module):
 
         nn.init.trunc_normal_(self.type_embedding, std=0.02)
         nn.init.trunc_normal_(self.latent_type_embedding, std=0.02)
+        nn.init.trunc_normal_(self.null_latent_tokens, std=0.02)
 
     def _state_ids(self, states):
         return map_dark_states(states, self.grid_size).to(torch.long)
@@ -178,15 +181,29 @@ class RAD(nn.Module):
         return latent_tokens
 
     def _memory_sequence_len(self, latent_tokens, recent_context):
-        latent_len = 0 if latent_tokens is None else latent_tokens.shape[1]
+        latent_len = self.n_compress_tokens if self._uses_latent_prefix(latent_tokens) else 0
         recent_len = 0 if recent_context is None else recent_context.shape[1]
         return latent_len + recent_len
 
+    def _uses_latent_prefix(self, latent_tokens):
+        return latent_tokens is not None or self.always_use_latent_prefix
+
+    def _null_latent_prefix(self, batch_size, device, dtype):
+        return self.null_latent_tokens.to(device=device, dtype=dtype).expand(batch_size, -1, -1)
+
     def _pack_memory_input(self, latent_tokens, recent_context):
         has_recent = recent_context is not None and recent_context.shape[1] > 0
-        if latent_tokens is not None and has_recent:
-            return torch.cat([latent_tokens, recent_context], dim=1), True
+        if latent_tokens is None and self.always_use_latent_prefix:
+            if recent_context is None:
+                return recent_context, False
+            latent_tokens = self._null_latent_prefix(
+                batch_size=recent_context.shape[0],
+                device=recent_context.device,
+                dtype=recent_context.dtype,
+            )
         if latent_tokens is not None:
+            if has_recent:
+                return torch.cat([latent_tokens, recent_context], dim=1), True
             return latent_tokens, True
         return recent_context, False
 
@@ -211,7 +228,7 @@ class RAD(nn.Module):
         while self._memory_sequence_len(latent_tokens, recent_context) > self.max_seq_length:
             if respect_curriculum and self.max_compressions is not None and compression_round >= self.max_compressions:
                 keep_len = self.max_seq_length
-                if latent_tokens is not None:
+                if self._uses_latent_prefix(latent_tokens):
                     keep_len -= self.n_compress_tokens
                 keep_len = max(0, keep_len)
                 recent_context = recent_context[:, -keep_len:] if keep_len > 0 else recent_context[:, :0]
@@ -254,7 +271,7 @@ class RAD(nn.Module):
         cursor = 0
 
         while cursor < context_embed.shape[1]:
-            latent_len = 0 if latent_tokens is None else self.n_compress_tokens
+            latent_len = self.n_compress_tokens if self._uses_latent_prefix(latent_tokens) else 0
             capacity = self.max_seq_length - latent_len
             recent_len = 0 if recent_context is None else recent_context.shape[1]
             remaining = context_embed.shape[1] - cursor
@@ -304,7 +321,7 @@ class RAD(nn.Module):
 
         transformer_input, has_latent = self._pack_memory_input(latent_tokens, recent_context)
         transformer_output = self._forward_ad_transformer(transformer_input, has_latent_prefix=has_latent)
-        latent_len = 0 if latent_tokens is None else latent_tokens.shape[1]
+        latent_len = self.n_compress_tokens if has_latent else 0
         recent_output = transformer_output[:, latent_len:]
 
         logits_actions = self.pred_action(recent_output)
@@ -446,6 +463,10 @@ class RAD(nn.Module):
 
         if 'type_embedding' in checkpoint['model']:
             self.type_embedding.data.copy_(checkpoint['model']['type_embedding'])
+        if 'latent_type_embedding' in checkpoint['model']:
+            self.latent_type_embedding.data.copy_(checkpoint['model']['latent_type_embedding'])
+        if 'null_latent_tokens' in checkpoint['model']:
+            self.null_latent_tokens.data.copy_(checkpoint['model']['null_latent_tokens'])
 
         print(f"Loaded pre-trained compression from {pretrain_checkpoint_path}")
 

@@ -13,6 +13,7 @@ n_transit: 40           # 40 environment timesteps = 120 transformer tokens
 
 # Compression Settings (must match rad_dr.yaml)
 n_compress_tokens: 15   # Must be a multiple of 3 for s/a/r token consistency
+always_use_latent_prefix: True
 compress_n_layers: 3    # Match rad_dr.yaml
 compress_n_heads: 4     # Match rad_dr.yaml
 

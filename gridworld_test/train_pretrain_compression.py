@@ -184,12 +184,16 @@ if __name__ == '__main__':
     if len(ckpt_paths) > 0:
         ckpt_path = ckpt_paths[-1]
         ckpt = torch.load(ckpt_path, map_location=config['device'])
-        model.load_state_dict(ckpt['model'])
+        load_result = model.load_state_dict(ckpt['model'], strict=False)
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_sched.load_state_dict(ckpt['lr_sched'])
         step = ckpt['step']
         if is_main:
             print(f'Checkpoint loaded from {ckpt_path}')
+            if load_result.missing_keys:
+                print(f'Missing model keys initialized from current config: {load_result.missing_keys}')
+            if load_result.unexpected_keys:
+                print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
 
     # Prepare for distributed training
     model, optimizer, train_dataloader, lr_sched = accelerator.prepare(
