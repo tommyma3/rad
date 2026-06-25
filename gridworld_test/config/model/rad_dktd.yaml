@@ -1,0 +1,80 @@
+include: config/model/ad_base.yaml
+
+model: RAD
+
+# AD Transformer - match AD's proven config for DKTD.
+# n_transit is environment timesteps; internally this is 3 * n_transit s/a/r tokens.
+tf_n_embd: 64
+tf_n_layer: 4
+tf_n_head: 4
+tf_dropout: 0.1
+tf_attn_dropout: 0.1
+tf_n_inner: 128         # 4x embedding dim
+gradient_checkpointing: True
+n_transit: 120          # 120 environment timesteps = 360 transformer tokens
+
+# Compression Settings
+n_compress_tokens: 48   # Must be a multiple of 3 for s/a/r token consistency
+short_memory_keep: 36   # Recent uncompressed environment timesteps kept after compression
+compress_n_layers: 4    # Deeper compression for better representation
+compress_n_heads: 4
+
+# Gradient control
+max_gradient_rounds: 99
+
+# Curriculum settings (None = unlimited)
+max_compressions: null
+
+# Dataset settings
+# With n_transit=120, compression triggers after the 120-timestep token budget is exceeded.
+min_context_length: 100
+max_context_length: 1500
+
+# Curriculum with stage-specific length distributions
+curriculum_schedule:
+  - step: 0
+    max_compressions: 2
+    length_distribution:
+      short: 0.30       # Less short - need compression practice
+      medium: 0.55      # More medium - 1-2 compressions
+      long: 0.15
+      very_long: 0.00
+  - step: 25000
+    max_compressions: 4
+    length_distribution:
+      short: 0.20
+      medium: 0.45
+      long: 0.30
+      very_long: 0.05
+  - step: 50000
+    max_compressions: 6
+    length_distribution:
+      short: 0.15
+      medium: 0.35
+      long: 0.35
+      very_long: 0.15
+  - step: 70000
+    max_compressions: null
+    length_distribution:
+      short: 0.15
+      medium: 0.30
+      long: 0.30
+      very_long: 0.25
+
+# Training
+lr: 0.0003
+train_batch_size: 128
+test_batch_size: 256
+train_source_timesteps: 2000
+train_timesteps: 100000
+num_warmup_steps: 2000
+
+# Curriculum-aware LR scheduler settings
+stage_warmup_steps: 500
+min_lr_ratio: 0.1
+
+# Best model tracking
+save_best_model: True
+early_stopping_patience: 10
+
+num_workers: 4
