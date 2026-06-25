@@ -36,6 +36,7 @@ max_compressions: null
 #   very_long: 500-1000 (10+ compressions)
 min_context_length: 20
 max_context_length: 1000
+rad_batching_strategy: compression_buckets
 
 # Curriculum with stage-specific length distributions
 # NOTE: Final stage should start well before train_timesteps to allow learning!

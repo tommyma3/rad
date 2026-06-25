@@ -31,6 +31,7 @@ max_compressions: null
 # Compression triggers after roughly 104 recent environment timesteps.
 min_context_length: 100
 max_context_length: 1500
+rad_batching_strategy: compression_buckets
 
 # Curriculum with stage-specific length distributions
 curriculum_schedule:

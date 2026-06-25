@@ -86,10 +86,29 @@ def rad_collate_fn(batch, grid_size, num_actions=5):
 def get_rad_data_loader(dataset, batch_size, config, shuffle=True, use_length_grouping=True):
     """Data loader for RAD with variable-length collate function."""
     from torch.utils.data import DataLoader
-    from dataset import LengthGroupedSampler
+    from dataset import CompressionBucketBatchSampler, LengthGroupedSampler
     
     collate_fn = partial(rad_collate_fn, grid_size=config['grid_size'], num_actions=config['num_actions'])
     num_workers = config.get('num_workers', 0)
+    batching_strategy = config.get('rad_batching_strategy', 'length_grouped')
+
+    if batching_strategy not in ('compression_buckets', 'length_grouped', 'variable'):
+        raise ValueError(f'Unknown RAD batching strategy: {batching_strategy}')
+
+    if batching_strategy == 'compression_buckets':
+        sampler = CompressionBucketBatchSampler(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
+        )
 
     if use_length_grouping:
         sampler = LengthGroupedSampler(
@@ -318,6 +337,7 @@ if __name__ == '__main__':
         print(f'Max context length: {config.get("max_context_length", 800)}')
         print(f'Train source timesteps: {config.get("train_source_timesteps", 1000)}')
         print(f'Train timesteps: {config.get("train_timesteps", 100000)}')
+        print(f'RAD batching strategy: {config.get("rad_batching_strategy", "length_grouped")}')
         
         # Save config
         config_save_path = path.join(log_dir, 'config.yaml')
@@ -379,6 +399,14 @@ if __name__ == '__main__':
     if is_main:
         print(f'Dataset sequence length: {train_dataset.seq_length}')
         print(f'Number of training histories: {train_dataset.n_histories}')
+
+    if use_curriculum:
+        initial_max_comp = get_curriculum_max_compressions(step, curriculum)
+        model.set_curriculum(initial_max_comp)
+        train_dataset.update_max_compressions(initial_max_comp)
+        train_dataset.update_length_distribution(get_curriculum_length_distribution(step, curriculum))
+    else:
+        train_dataset.update_max_compressions(None)
     
     # Use standard AD dataset for testing (fixed length)
     test_dataset = ADDataset(
@@ -504,23 +532,25 @@ if __name__ == '__main__':
         pbar.update(step)
 
         while step < config['train_timesteps']:
-            batch = next(train_dataloader)
-            
-            step += 1
+            next_step = step + 1
             
             # Update curriculum (model max_compressions AND dataset length distribution)
             if use_curriculum:
                 # Check if curriculum stage changed - update dataset length distribution
-                new_stage = get_curriculum_stage(step, curriculum)
+                new_stage = get_curriculum_stage(next_step, curriculum)
                 if new_stage != current_curriculum_stage:
                     current_curriculum_stage = new_stage
-                    max_comp = get_curriculum_max_compressions(step, curriculum)
+                    max_comp = get_curriculum_max_compressions(next_step, curriculum)
                     accelerator.unwrap_model(model).set_curriculum(max_comp)
-                    new_length_dist = get_curriculum_length_distribution(step, curriculum)
+                    train_dataset.update_max_compressions(max_comp)
+                    new_length_dist = get_curriculum_length_distribution(next_step, curriculum)
                     train_dataset.update_length_distribution(new_length_dist)
                     if is_main:
-                        print(f'\n[Step {step}] Curriculum stage {new_stage}: max_comp={max_comp}, '
+                        print(f'\n[Step {next_step}] Curriculum stage {new_stage}: max_comp={max_comp}, '
                               f'length_dist={new_length_dist}')
+
+            batch = next(train_dataloader)
+            step = next_step
             
             with accelerator.autocast():
                 output = model(batch)
