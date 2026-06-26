@@ -21,7 +21,7 @@ torch.backends.cudnn.deterministic = True
 
 
 if __name__ == '__main__':
-    ckpt_dir = './runs/AD-dark_key_to_door-seed0'
+    ckpt_dir = './runs/AD-darkroom-seed0'
     ckpt_paths = sorted(glob(path.join(ckpt_dir, 'ckpt-*.pt')))
 
     if len(ckpt_paths) > 0:

@@ -164,7 +164,8 @@ class AD(torch.nn.Module):
                 self._typed_state_token(next_states),
             ]
             transformer_input = torch.cat([transformer_input, *new_tokens], dim=1)
-            transformer_input = transformer_input[:, -self.max_seq_length:]
+            max_eval_length = self.max_seq_length - 2
+            transformer_input = transformer_input[:, -max_eval_length:]
 
         outputs['reward_episode'] = np.stack(outputs['reward_episode'], axis=1)
         return outputs
