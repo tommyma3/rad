@@ -28,4 +28,14 @@ max_context_length: 1000
 train_source_timesteps: 1000
 train_n_stream: 100
 
+# Compile tensor-heavy compression modules while leaving the pretrain wrapper eager.
+torch_compile: True
+torch_compile_modules:
+  - compression_transformer
+  - reconstruction_decoder
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
+
 num_workers: 16

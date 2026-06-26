@@ -160,9 +160,15 @@ class RAD(nn.Module):
 
         return mask
 
+    def _module_for_current_grad_mode(self, module):
+        if torch.is_grad_enabled():
+            return module
+        return getattr(module, '_orig_mod', module)
+
     def _forward_ad_transformer(self, x, has_latent_prefix=False):
+        ad_transformer = self._module_for_current_grad_mode(self.ad_transformer)
         if not has_latent_prefix:
-            return self.ad_transformer(x, use_causal_mask=True)
+            return ad_transformer(x, use_causal_mask=True)
 
         batch_size = x.shape[0]
         seq_len = x.shape[1]
@@ -172,10 +178,11 @@ class RAD(nn.Module):
         x = x + torch.cat([latent_type, zero_type], dim=1)
 
         attn_mask = self._get_attention_mask_for_latent(seq_len)
-        return self.ad_transformer(x, attention_mask=attn_mask, use_causal_mask=False)
+        return ad_transformer(x, attention_mask=attn_mask, use_causal_mask=False)
 
     def _compress_sequence(self, context_embed, compression_round):
-        latent_tokens = self.compression_transformer(context_embed)
+        compression_transformer = self._module_for_current_grad_mode(self.compression_transformer)
+        latent_tokens = compression_transformer(context_embed)
         # Compiled CUDAGraph outputs can be overwritten by later compiled
         # invocations; latent memory is kept across compression rounds.
         latent_tokens = latent_tokens.clone()

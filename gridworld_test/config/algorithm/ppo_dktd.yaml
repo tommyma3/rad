@@ -1,6 +1,6 @@
 include: config/algorithm/ppo_base.yaml
 
-# Stronger tuning for corner-to-corner dark_key_to_door
+# Stronger tuning for corner-to-corner dktd
 # Larger rollouts, more exploration (entropy), longer training budget.
 n_steps: 50
 batch_size: 100

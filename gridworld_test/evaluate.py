@@ -21,7 +21,7 @@ torch.backends.cudnn.deterministic = True
 
 
 if __name__ == '__main__':
-    ckpt_dir = './runs/AD-darkroom-seed0'
+    ckpt_dir = './runs/AD-dktd-seed0'
     ckpt_paths = sorted(glob(path.join(ckpt_dir, 'ckpt-*.pt')))
 
     if len(ckpt_paths) > 0:
@@ -44,7 +44,7 @@ if __name__ == '__main__':
 
     if env_name == 'darkroom':
         envs = DummyVecEnv([make_env(config, goal=arg) for arg in test_env_args])
-    elif env_name == 'dark_key_to_door':
+    elif env_name == 'dktd':
         envs = DummyVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in test_env_args])
     else:
         raise NotImplementedError(f'Environment not supported: {env_name}')
@@ -70,8 +70,8 @@ if __name__ == '__main__':
     with open(path, 'wb') as f:
         np.save(f, test_rewards)
 
-    for i in range(len(test_env_args)):
-        print(f'Env {i} (goal={test_env_args[i]}): {test_rewards[i]}')
+    #for i in range(len(test_env_args)):
+        #print(f'Env {i} (goal={test_env_args[i]}): {test_rewards[i]}')
 
     print("Mean reward per environment:", test_rewards.mean(axis=1))
     print("Overall mean reward: ", test_rewards.mean())

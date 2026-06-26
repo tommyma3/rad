@@ -9,7 +9,7 @@ from gymnasium import spaces
 from gymnasium.core import ObsType
 
 
-def sample_dark_key_to_door(config, shuffle=True):
+def sample_dktd(config, shuffle=True):
     keys_goals_all = [np.array([i, j, k, l])
              for i in range(config['grid_size']) for j in range(config['grid_size'])
              for k in range(config['grid_size']) for l in range(config['grid_size'])]

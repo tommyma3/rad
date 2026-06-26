@@ -1,4 +1,4 @@
-env: dark_key_to_door
+env: dktd
 grid_size: 9
 dim_states: 2
 dim_actions: 1

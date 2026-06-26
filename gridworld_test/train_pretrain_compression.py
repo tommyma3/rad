@@ -27,7 +27,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import CompressionPretrainDataset
 from model import MODEL
-from utils import get_config, get_data_loader, next_dataloader
+from utils import (
+    checkpoint_state_dict,
+    configure_torch_runtime,
+    get_config,
+    get_data_loader,
+    maybe_compile_model,
+    next_dataloader,
+    normalize_compiled_state_dict,
+)
 from transformers import get_cosine_schedule_with_warmup
 
 import multiprocessing
@@ -71,13 +79,13 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='rad_pretrain',
                        help='Model config name (without .yaml extension)')
     parser.add_argument('--env', type=str, default='darkroom',
-                       help='Environment name: darkroom or dark_key_to_door')
+                       help='Environment name: darkroom or dktd')
     args = parser.parse_args()
     
     # Determine config files based on environment
     env_config_map = {
         'darkroom': ('darkroom', 'ppo_darkroom'),
-        'dark_key_to_door': ('dark_key_to_door', 'ppo_dark_key_to_door'),
+        'dktd': ('dktd', 'ppo_dktd'),
     }
     if args.env not in env_config_map:
         raise ValueError(f'Unknown environment: {args.env}')
@@ -109,6 +117,7 @@ if __name__ == '__main__':
     config['log_dir'] = log_dir
     config['traj_dir'] = './datasets'
     config['mixed_precision'] = 'fp16'
+    configure_torch_runtime(config)
 
     # Initialize accelerator for multi-GPU support
     accelerator = Accelerator(
@@ -184,7 +193,7 @@ if __name__ == '__main__':
     if len(ckpt_paths) > 0:
         ckpt_path = ckpt_paths[-1]
         ckpt = torch.load(ckpt_path, map_location=config['device'])
-        load_result = model.load_state_dict(ckpt['model'], strict=False)
+        load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_sched.load_state_dict(ckpt['lr_sched'])
         step = ckpt['step']
@@ -194,6 +203,13 @@ if __name__ == '__main__':
                 print(f'Missing model keys initialized from current config: {load_result.missing_keys}')
             if load_result.unexpected_keys:
                 print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
+
+    model = maybe_compile_model(
+        model,
+        config,
+        is_main,
+        default_modules=['compression_transformer', 'reconstruction_decoder'],
+    )
 
     # Prepare for distributed training
     model, optimizer, train_dataloader, lr_sched = accelerator.prepare(
@@ -251,7 +267,7 @@ if __name__ == '__main__':
                 torch.save({
                     'step': step,
                     'config': config,
-                    'model': unwrapped_model.state_dict(),
+                    'model': checkpoint_state_dict(unwrapped_model),
                     'optimizer': optimizer.state_dict(),
                     'lr_sched': lr_sched.state_dict(),
                 }, new_ckpt_path)
@@ -266,7 +282,7 @@ if __name__ == '__main__':
         torch.save({
             'step': step,
             'config': config,
-            'model': unwrapped_model.state_dict(),
+            'model': checkpoint_state_dict(unwrapped_model),
         }, final_path)
         print(f'\nFinal model saved to {final_path}')
 

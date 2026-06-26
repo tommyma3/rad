@@ -47,7 +47,7 @@ def worker(arg, config, traj_dir, env_idx, history, file_name):
             )
             for _ in range(config['n_stream'])
         ])
-    elif config['env'] == 'dark_key_to_door':
+    elif config['env'] == 'dktd':
         # arg is (key_x, key_y, goal_x, goal_y)
         key = arg[:2]
         goal = arg[2:]
@@ -61,7 +61,7 @@ def worker(arg, config, traj_dir, env_idx, history, file_name):
             )
             for _ in range(config['n_stream'])
         ])
-        # Apply VecFrameStack for dark_key_to_door environment
+        # Apply VecFrameStack for dktd environment
         if n_stack > 1:
             env = VecFrameStack(env, n_stack=n_stack)
     else:
@@ -95,9 +95,9 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='darkroom',
-                       help='Environment name: darkroom or dark_key_to_door')
+                       help='Environment name: darkroom or dktd')
     parser.add_argument('--n-stack', type=int, default=8,
-                       help='Number of frames to stack (only for dark_key_to_door)')
+                       help='Number of frames to stack (only for dktd)')
     parser.add_argument('--alg', type=str, default=None,
                        help='Algorithm config name without .yaml extension')
     parser.add_argument('--max-envs', type=int, default=None,
@@ -107,7 +107,7 @@ if __name__ == '__main__':
     # Determine config files based on environment
     env_config_map = {
         'darkroom': ('darkroom', 'ppo_darkroom'),
-        'dark_key_to_door': ('dark_key_to_door', 'ppo_dark_key_to_door'),
+        'dktd': ('dktd', 'ppo_dktd'),
     }
     if args.env not in env_config_map:
         raise ValueError(f'Unknown environment: {args.env}')
@@ -118,8 +118,8 @@ if __name__ == '__main__':
     config = get_config(f"config/env/{env_cfg}.yaml")
     config.update(get_config(f"config/algorithm/{alg_cfg}.yaml"))
     
-    # Add n_stack to config for dark_key_to_door
-    if args.env == 'dark_key_to_door':
+    # Add n_stack to config for dktd
+    if args.env == 'dktd':
         config['n_stack'] = args.n_stack
 
     if not os.path.exists("datasets"):

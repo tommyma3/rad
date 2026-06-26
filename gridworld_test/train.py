@@ -30,7 +30,16 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset import ADDataset
 from env import SAMPLE_ENVIRONMENT
 from model import MODEL
-from utils import get_config, get_data_loader, log_in_context, next_dataloader
+from utils import (
+    checkpoint_state_dict,
+    configure_torch_runtime,
+    get_config,
+    get_data_loader,
+    log_in_context,
+    maybe_compile_model,
+    next_dataloader,
+    normalize_compiled_state_dict,
+)
 from transformers import get_cosine_schedule_with_warmup
 
 import multiprocessing
@@ -46,13 +55,13 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='ad_dr',
                        help='Model config name (without .yaml extension)')
     parser.add_argument('--env', type=str, default='darkroom',
-                       help='Environment name: darkroom or dark_key_to_door')
+                       help='Environment name: darkroom or dktd')
     args = parser.parse_args()
     
     # Determine config files based on environment
     env_config_map = {
         'darkroom': ('darkroom', 'ppo_darkroom'),
-        'dark_key_to_door': ('dark_key_to_door', 'ppo_dark_key_to_door'),
+        'dktd': ('dktd', 'ppo_dktd'),
     }
     if args.env not in env_config_map:
         raise ValueError(f'Unknown environment: {args.env}')
@@ -72,6 +81,7 @@ if __name__ == '__main__':
     
     config['traj_dir'] = './datasets'
     config['mixed_precision'] = 'fp16'  # 'no' for fp32, or 'fp16'/'bf16' for mixed precision
+    configure_torch_runtime(config)
 
     # Initialize accelerator for multi-GPU support
     accelerator = Accelerator(
@@ -130,12 +140,14 @@ if __name__ == '__main__':
     if len(ckpt_paths) > 0:
         ckpt_path = ckpt_paths[-1]
         ckpt = torch.load(ckpt_path, map_location=config['device'])
-        model.load_state_dict(ckpt['model'])
+        model.load_state_dict(normalize_compiled_state_dict(ckpt['model']))
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_sched.load_state_dict(ckpt['lr_sched'])
         step = ckpt['step']
         if is_main:
             print(f'Checkpoint loaded from {ckpt_path}')
+
+    model = maybe_compile_model(model, config, is_main, default_modules=['transformer'])
 
     env_name = config['env']
     train_env_args, test_env_args = SAMPLE_ENVIRONMENT[env_name](config)
@@ -145,7 +157,7 @@ if __name__ == '__main__':
 
     if env_name == "darkroom":
         envs = DummyVecEnv([make_env(config, goal=arg) for arg in env_args])
-    elif env_name == "dark_key_to_door":
+    elif env_name == "dktd":
         envs = DummyVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in env_args])
     else:
         raise NotImplementedError(f'Environment not supported: {env_name}')
@@ -243,7 +255,7 @@ if __name__ == '__main__':
                 torch.save({
                     'step': step,
                     'config': config,
-                    'model': unwrapped_model.state_dict(),
+                    'model': checkpoint_state_dict(unwrapped_model),
                     'optimizer': optimizer.state_dict(),
                     'lr_sched': lr_sched.state_dict(),
                 }, new_ckpt_path)

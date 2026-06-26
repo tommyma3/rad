@@ -1,4 +1,4 @@
-include: config/algorithm/ppo_dark_key_to_door.yaml
+include: config/algorithm/ppo_dktd.yaml
 
 alg: PPOOptimistic
 optimistic_exploration: true

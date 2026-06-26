@@ -289,7 +289,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='rad_dr',
                        help='Model config name (without .yaml extension)')
     parser.add_argument('--env', type=str, default='darkroom',
-                       help='Environment name: darkroom or dark_key_to_door')
+                       help='Environment name: darkroom or dktd')
     args = parser.parse_args()
     
     multiprocessing.set_start_method('spawn', force=True)
@@ -298,9 +298,9 @@ if __name__ == '__main__':
     if args.env == 'darkroom':
         config = get_config('./config/env/darkroom.yaml')
         config.update(get_config('./config/algorithm/ppo_darkroom.yaml'))
-    elif args.env == 'dark_key_to_door':
-        config = get_config('./config/env/dark_key_to_door.yaml')
-        config.update(get_config('./config/algorithm/ppo_dark_key_to_door.yaml'))
+    elif args.env == 'dktd':
+        config = get_config('./config/env/dktd.yaml')
+        config.update(get_config('./config/algorithm/ppo_dktd.yaml'))
     else:
         raise ValueError(f'Unknown environment: {args.env}')
     config.update(get_config(f'./config/model/{args.config}.yaml'))
@@ -517,7 +517,7 @@ if __name__ == '__main__':
 
     if env_name == "darkroom":
         envs = DummyVecEnv([make_env(config, goal=arg) for arg in env_args])
-    elif env_name == "dark_key_to_door":
+    elif env_name == "dktd":
         envs = DummyVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in env_args])
     else:
         raise NotImplementedError(f'Environment not supported: {env_name}')

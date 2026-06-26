@@ -81,6 +81,11 @@ class AD(torch.nn.Module):
         tokens = tokens + self.type_embedding
         return rearrange(tokens, 'b t m d -> b (t m) d')
 
+    def _module_for_current_grad_mode(self, module):
+        if torch.is_grad_enabled():
+            return module
+        return getattr(module, '_orig_mod', module)
+
     def _typed_state_token(self, states):
         return self._embed_state(states) + self.type_embedding[:, :, 0, :]
 
@@ -96,7 +101,8 @@ class AD(torch.nn.Module):
         rewards = x['rewards'].to(self.device)
 
         tokens = self._build_token_sequence(states, actions, rewards)
-        transformer_output = self.transformer(tokens, use_causal_mask=True)
+        transformer = self._module_for_current_grad_mode(self.transformer)
+        transformer_output = transformer(tokens, use_causal_mask=True)
 
         state_outputs = transformer_output[:, 0::3]
         logits_actions = self.pred_action(state_outputs)
@@ -124,7 +130,8 @@ class AD(torch.nn.Module):
         transformer_input = self._typed_state_token(query_states)
 
         for _ in range(eval_timesteps):
-            output = self.transformer(transformer_input, use_causal_mask=True)
+            transformer = self._module_for_current_grad_mode(self.transformer)
+            output = transformer(transformer_input, use_causal_mask=True)
             logits = self.pred_action(output[:, -1])
 
             if sample:

@@ -19,4 +19,14 @@ train_source_timesteps: 1000
 train_timesteps: 50000
 num_warmup_steps: 1000  
 
+# Compile tensor-heavy transformer while leaving training/eval loops eager.
+torch_compile: True
+torch_compile_modules:
+  - transformer
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
+torch_compile_cudagraphs: False
+
 num_workers: 4
