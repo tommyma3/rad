@@ -14,6 +14,21 @@ import torch
 import yaml
 
 
+class SummaryConfigLoader(yaml.SafeLoader):
+    pass
+
+
+def construct_torch_device(loader, node):
+    values = loader.construct_sequence(node)
+    return str(values[0]) if values else None
+
+
+SummaryConfigLoader.add_constructor(
+    'tag:yaml.org,2002:python/object/apply:torch.device',
+    construct_torch_device,
+)
+
+
 DEFAULT_RUN_NAMES = {
     'replace': 'RAD-dktd-seed0-replace',
     'residual': 'RAD-dktd-seed0-residual',
@@ -26,7 +41,7 @@ def load_yaml(path):
     if not path.exists():
         return {}
     with open(path, 'r') as f:
-        return yaml.safe_load(f) or {}
+        return yaml.load(f, Loader=SummaryConfigLoader) or {}
 
 
 def load_checkpoint_metadata(path):
