@@ -21,6 +21,8 @@ from .gpt2 import GPT2Transformer
 class RAD(nn.Module):
     """RAD over interleaved state/action/reward tokens."""
 
+    LATENT_UPDATE_MODES = ('replace', 'residual', 'multiplicative_gate', 'gru_gate')
+
     def __init__(self, config):
         super(RAD, self).__init__()
 
@@ -45,6 +47,12 @@ class RAD(nn.Module):
         self.max_compressions = config.get('max_compressions', None)
         self.max_context_tokens = 3 * config.get('max_context_length', self.n_transit)
         self.always_use_latent_prefix = config.get('always_use_latent_prefix', False)
+        self.latent_update_mode = config.get('latent_update_mode', 'replace')
+        if self.latent_update_mode not in self.LATENT_UPDATE_MODES:
+            raise ValueError(
+                f'Unknown latent_update_mode: {self.latent_update_mode}. '
+                f'Expected one of {self.LATENT_UPDATE_MODES}'
+            )
 
         tf_n_embd = config['tf_n_embd']
         tf_n_head = config.get('tf_n_head', 4)
@@ -71,6 +79,10 @@ class RAD(nn.Module):
         self.null_latent_tokens = nn.Parameter(torch.zeros(1, self.n_compress_tokens, tf_n_embd))
 
         self.pred_action = nn.Linear(tf_n_embd, self.num_actions)
+        self.latent_residual_norm = nn.LayerNorm(tf_n_embd)
+        self.latent_multiplicative_gate = nn.Linear(tf_n_embd, tf_n_embd)
+        self.latent_gru_gate = nn.Linear(2 * tf_n_embd, tf_n_embd)
+        self.latent_gru_candidate = nn.Linear(2 * tf_n_embd, tf_n_embd)
 
         self.compression_transformer = CompressionTransformer(
             d_model=tf_n_embd,
@@ -93,6 +105,12 @@ class RAD(nn.Module):
         nn.init.trunc_normal_(self.type_embedding, std=0.02)
         nn.init.trunc_normal_(self.latent_type_embedding, std=0.02)
         nn.init.trunc_normal_(self.null_latent_tokens, std=0.02)
+        nn.init.zeros_(self.latent_multiplicative_gate.weight)
+        nn.init.constant_(self.latent_multiplicative_gate.bias, config.get('latent_gate_init_bias', 4.0))
+        nn.init.zeros_(self.latent_gru_gate.weight)
+        nn.init.constant_(self.latent_gru_gate.bias, config.get('latent_gru_init_bias', -2.0))
+        nn.init.zeros_(self.latent_gru_candidate.weight)
+        nn.init.zeros_(self.latent_gru_candidate.bias)
 
     def _state_ids(self, states):
         return map_dark_states(states, self.grid_size).to(torch.long)
@@ -180,9 +198,36 @@ class RAD(nn.Module):
         attn_mask = self._get_attention_mask_for_latent(seq_len)
         return ad_transformer(x, attention_mask=attn_mask, use_causal_mask=False)
 
-    def _compress_sequence(self, context_embed, compression_round):
+    def _update_latent_tokens(self, old_latent_tokens, candidate_latent_tokens):
+        if old_latent_tokens is None or self.latent_update_mode == 'replace':
+            return candidate_latent_tokens
+
+        if old_latent_tokens.shape != candidate_latent_tokens.shape:
+            raise ValueError(
+                f'Latent update shape mismatch: old={old_latent_tokens.shape}, '
+                f'candidate={candidate_latent_tokens.shape}'
+            )
+
+        if self.latent_update_mode == 'residual':
+            return self.latent_residual_norm(old_latent_tokens + candidate_latent_tokens)
+
+        if self.latent_update_mode == 'multiplicative_gate':
+            gate = torch.sigmoid(self.latent_multiplicative_gate(old_latent_tokens))
+            return gate * candidate_latent_tokens
+
+        if self.latent_update_mode == 'gru_gate':
+            update_input = torch.cat([old_latent_tokens, candidate_latent_tokens], dim=-1)
+            update_gate = torch.sigmoid(self.latent_gru_gate(update_input))
+            candidate_delta = torch.tanh(self.latent_gru_candidate(update_input))
+            candidate_state = candidate_latent_tokens + candidate_delta
+            return (1.0 - update_gate) * old_latent_tokens + update_gate * candidate_state
+
+        raise RuntimeError(f'Unhandled latent_update_mode: {self.latent_update_mode}')
+
+    def _compress_sequence(self, context_embed, compression_round, old_latent_tokens=None):
         compression_transformer = self._module_for_current_grad_mode(self.compression_transformer)
         latent_tokens = compression_transformer(context_embed)
+        latent_tokens = self._update_latent_tokens(old_latent_tokens, latent_tokens)
         # Compiled CUDAGraph outputs can be overwritten by later compiled
         # invocations; latent memory is kept across compression rounds.
         latent_tokens = latent_tokens.clone()
@@ -265,7 +310,11 @@ class RAD(nn.Module):
             if recent_targets is not None:
                 recent_targets = recent_targets[:, prefix_len:]
 
-            latent_tokens = self._compress_sequence(compress_input, compression_round)
+            latent_tokens = self._compress_sequence(
+                compress_input,
+                compression_round,
+                old_latent_tokens=latent_tokens,
+            )
             compression_round += 1
             compression_info['num_compressions'] += 1
 

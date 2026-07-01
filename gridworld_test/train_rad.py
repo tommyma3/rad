@@ -308,7 +308,10 @@ if __name__ == '__main__':
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
 
-    log_dir = path.join('./runs', f"RAD-{config['env']}-seed{config['env_split_seed']}")
+    runs_root = config.get('runs_root', './runs')
+    default_run_name = f"RAD-{config['env']}-seed{config['env_split_seed']}"
+    run_name = config.get('run_name', default_run_name)
+    log_dir = path.join(runs_root, run_name)
     
     # Check if already exists
     config_save_path = path.join(log_dir, 'config.yaml')
@@ -371,7 +374,11 @@ if __name__ == '__main__':
         model.load_pretrained_compression(args.pretrain_ckpt)
     else:
         # Try to find pre-trained checkpoint automatically
-        pretrain_dir = path.join('./runs', f"RAD-pretrain-{config['env']}-seed{config['env_split_seed']}")
+        pretrain_run_name = config.get(
+            'pretrain_run_name',
+            f"RAD-pretrain-{config['env']}-seed{config['env_split_seed']}",
+        )
+        pretrain_dir = path.join(runs_root, pretrain_run_name)
         pretrain_path = path.join(pretrain_dir, 'pretrain-final.pt')
         if path.exists(pretrain_path):
             if is_main:

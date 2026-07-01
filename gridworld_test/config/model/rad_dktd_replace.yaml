@@ -1,0 +1,6 @@
+include: config/model/rad_dktd.yaml
+
+latent_update_mode: replace
+run_name: RAD-dktd-seed0-replace
+pretrain_run_name: RAD-pretrain-dktd-seed0
+experiment_name: rad_latent_update_comparison
