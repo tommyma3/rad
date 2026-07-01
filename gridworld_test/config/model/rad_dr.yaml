@@ -11,7 +11,7 @@ tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128         # 2x embedding dim
 gradient_checkpointing: False
-n_transit: 40           # 40 environment timesteps = 120 transformer tokens
+n_transit: 30           # 40 environment timesteps = 120 transformer tokens
 
 # Compression Settings - compact latent representation
 n_compress_tokens: 15   # Must be a multiple of 3 for s/a/r token consistency

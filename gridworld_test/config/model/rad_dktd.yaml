@@ -11,12 +11,12 @@ tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128         # 4x embedding dim
 gradient_checkpointing: False
-n_transit: 66          # 120 environment timesteps = 360 transformer tokens
+n_transit: 72          # 120 environment timesteps = 360 transformer tokens
 
 # Compression Settings
-n_compress_tokens: 48   # Must be a multiple of 3 for s/a/r token consistency
+n_compress_tokens: 54   # Must be a multiple of 3 for s/a/r token consistency
 always_use_latent_prefix: True
-short_memory_keep: 0   # Recent uncompressed environment timesteps kept after compression
+short_memory_keep: 10   # Recent uncompressed environment timesteps kept after compression
 compress_n_layers: 4    # Deeper compression for better representation
 compress_n_heads: 4
 
@@ -66,10 +66,10 @@ curriculum_schedule:
 
 # Training
 lr: 0.0003
-train_batch_size: 512
-test_batch_size: 512
+train_batch_size: 1024
+test_batch_size: 1024
 train_source_timesteps: 1000
-train_timesteps: 100000
+train_timesteps: 300000
 num_warmup_steps: 2000
 
 # Curriculum-aware LR scheduler settings
