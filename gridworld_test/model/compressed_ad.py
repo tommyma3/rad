@@ -224,16 +224,21 @@ class RAD(nn.Module):
 
         raise RuntimeError(f'Unhandled latent_update_mode: {self.latent_update_mode}')
 
-    def _compress_sequence(self, context_embed, compression_round, old_latent_tokens=None):
-        compression_transformer = self._module_for_current_grad_mode(self.compression_transformer)
-        latent_tokens = compression_transformer(context_embed)
-        latent_tokens = self._update_latent_tokens(old_latent_tokens, latent_tokens)
+    def _compress_sequence(self, context_embed, allow_gradient, old_latent_tokens=None):
+        grad_enabled = torch.is_grad_enabled() and allow_gradient
+        with torch.set_grad_enabled(grad_enabled):
+            compression_transformer = self._module_for_current_grad_mode(self.compression_transformer)
+            latent_tokens = compression_transformer(context_embed)
+            latent_tokens = self._update_latent_tokens(old_latent_tokens, latent_tokens)
         # Compiled CUDAGraph outputs can be overwritten by later compiled
         # invocations; latent memory is kept across compression rounds.
         latent_tokens = latent_tokens.clone()
-        if compression_round >= self.max_gradient_rounds:
+        if not allow_gradient:
             latent_tokens = latent_tokens.detach()
         return latent_tokens
+
+    def _compression_round_allows_gradient(self, compression_round, gradient_start_round):
+        return compression_round >= gradient_start_round
 
     def _memory_sequence_len(self, latent_tokens, recent_context):
         latent_len = self.n_compress_tokens if self._uses_latent_prefix(latent_tokens) else 0
@@ -267,6 +272,77 @@ class RAD(nn.Module):
             return chunk
         return torch.cat([recent_context, chunk], dim=1)
 
+    def _uses_latent_prefix_from_state(self, has_latent_tokens):
+        return has_latent_tokens or self.always_use_latent_prefix
+
+    def _memory_sequence_len_from_state(self, has_latent_tokens, recent_len):
+        latent_len = self.n_compress_tokens if self._uses_latent_prefix_from_state(has_latent_tokens) else 0
+        return latent_len + recent_len
+
+    def _count_compressions_until_fits(
+        self,
+        has_latent_tokens,
+        recent_len,
+        compression_round=0,
+        respect_curriculum=True,
+    ):
+        num_compressions = 0
+        while self._memory_sequence_len_from_state(has_latent_tokens, recent_len) > self.max_seq_length:
+            if respect_curriculum and self.max_compressions is not None and compression_round >= self.max_compressions:
+                keep_len = self.max_seq_length
+                if self._uses_latent_prefix_from_state(has_latent_tokens):
+                    keep_len -= self.n_compress_tokens
+                recent_len = min(recent_len, max(0, keep_len))
+                break
+
+            keep_len = min(self.short_memory_keep_tokens, recent_len)
+            prefix_len = recent_len - keep_len
+            if prefix_len <= 0:
+                keep_len = max(0, self.max_seq_length - self.n_compress_tokens)
+                prefix_len = recent_len - keep_len
+                if prefix_len <= 0:
+                    break
+
+            recent_len -= prefix_len
+            has_latent_tokens = True
+            compression_round += 1
+            num_compressions += 1
+
+        return has_latent_tokens, recent_len, num_compressions
+
+    def _count_compressions_for_sequence(self, token_count, respect_curriculum=True):
+        has_latent_tokens = False
+        recent_len = 0
+        compression_round = 0
+        total_compressions = 0
+        cursor = 0
+
+        while cursor < token_count:
+            latent_len = self.n_compress_tokens if self._uses_latent_prefix_from_state(has_latent_tokens) else 0
+            capacity = self.max_seq_length - latent_len
+            remaining = token_count - cursor
+            room = capacity - recent_len
+            take_len = remaining if remaining <= room else max(1, min(room + 1, remaining))
+
+            recent_len += take_len
+            cursor += take_len
+
+            has_latent_tokens, recent_len, num_compressions = self._count_compressions_until_fits(
+                has_latent_tokens=has_latent_tokens,
+                recent_len=recent_len,
+                compression_round=compression_round,
+                respect_curriculum=respect_curriculum,
+            )
+            compression_round += num_compressions
+            total_compressions += num_compressions
+
+        return total_compressions
+
+    def _gradient_start_round(self, total_compressions):
+        if self.max_gradient_rounds <= 0:
+            return total_compressions
+        return max(0, total_compressions - self.max_gradient_rounds)
+
     def _compress_memory_until_fits(
         self,
         latent_tokens,
@@ -274,6 +350,7 @@ class RAD(nn.Module):
         recent_state_mask=None,
         recent_targets=None,
         compression_round=0,
+        gradient_start_round=0,
         respect_curriculum=True,
     ):
         compression_info = {'num_compressions': 0}
@@ -312,7 +389,10 @@ class RAD(nn.Module):
 
             latent_tokens = self._compress_sequence(
                 compress_input,
-                compression_round,
+                allow_gradient=self._compression_round_allows_gradient(
+                    compression_round,
+                    gradient_start_round,
+                ),
                 old_latent_tokens=latent_tokens,
             )
             compression_round += 1
@@ -327,6 +407,11 @@ class RAD(nn.Module):
         recent_targets = None
         compression_round = 0
         total_compressions = 0
+        planned_compressions = self._count_compressions_for_sequence(
+            context_embed.shape[1],
+            respect_curriculum=True,
+        )
+        gradient_start_round = self._gradient_start_round(planned_compressions)
         cursor = 0
 
         while cursor < context_embed.shape[1]:
@@ -354,6 +439,7 @@ class RAD(nn.Module):
                 recent_state_mask=recent_state_mask,
                 recent_targets=recent_targets,
                 compression_round=compression_round,
+                gradient_start_round=gradient_start_round,
                 respect_curriculum=True,
             )
             compression_round += info['num_compressions']

@@ -21,7 +21,7 @@ compress_n_layers: 4    # Deeper compression for better representation
 compress_n_heads: 4
 latent_update_mode: replace
 
-# Gradient control
+# Gradient control: keep gradients through the most recent compression rounds.
 max_gradient_rounds: 3
 
 # Curriculum settings (None = unlimited)

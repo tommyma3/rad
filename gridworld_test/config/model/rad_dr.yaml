@@ -20,7 +20,7 @@ short_memory_keep: 5   # Recent uncompressed environment timesteps kept after co
 compress_n_layers: 3
 compress_n_heads: 4
 
-# Gradient control
+# Gradient control: keep gradients through the most recent compression rounds.
 max_gradient_rounds: 3
 
 # Curriculum settings (None = unlimited)
