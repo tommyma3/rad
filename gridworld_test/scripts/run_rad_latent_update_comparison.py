@@ -9,6 +9,7 @@ Example:
 import argparse
 import os
 import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,39 @@ DEFAULT_RUN_NAMES = {
 
 def split_command(command):
     return shlex.split(command, posix=os.name != 'nt')
+
+
+def has_option(command, option):
+    return any(token == option or token.startswith(f'{option}=') for token in command)
+
+
+def accelerate_launch_index(command):
+    for index in range(len(command) - 1):
+        executable = Path(command[index]).name
+        if executable == 'accelerate' and command[index + 1] == 'launch':
+            return index
+    return None
+
+
+def allocate_free_port(used_ports):
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('', 0))
+            port = sock.getsockname()[1]
+        if port not in used_ports:
+            used_ports.add(port)
+            return port
+
+
+def add_main_process_port(command, used_ports):
+    if has_option(command, '--main_process_port'):
+        return command
+    launch_index = accelerate_launch_index(command)
+    if launch_index is None:
+        return command
+    port = allocate_free_port(used_ports)
+    insert_at = launch_index + 2
+    return command[:insert_at] + ['--main_process_port', str(port)] + command[insert_at:]
 
 
 def format_command(command, env):
@@ -76,7 +110,7 @@ def existing_pretrain_checkpoint(runs_root, pretrain_run_name):
 
 def run_pretrain(args, project_dir):
     env = {'CUDA_VISIBLE_DEVICES': args.pretrain_gpu}
-    command = split_command(args.launcher) + [
+    command = add_main_process_port(split_command(args.launcher), args.used_ports) + [
         'train_pretrain_compression.py',
         '--config',
         args.pretrain_config,
@@ -116,7 +150,7 @@ def run_variants(args, project_dir, runs_root, pretrain_ckpt):
     if not args.skip_train:
         train_processes = []
         for variant, gpu in zip(args.variants, args.gpus):
-            command = build_train_command(args, variant, pretrain_ckpt)
+            command = add_main_process_port(build_train_command(args, variant, pretrain_ckpt), args.used_ports)
             env = {'CUDA_VISIBLE_DEVICES': gpu}
             if args.dry_run:
                 run_command(command, project_dir, args.dry_run, env=env)
@@ -160,6 +194,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    args.used_ports = set()
     if args.pretrain_gpu is None:
         args.pretrain_gpu = args.gpus[0]
     project_dir = Path(__file__).resolve().parents[1]
