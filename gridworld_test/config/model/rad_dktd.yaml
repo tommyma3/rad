@@ -70,7 +70,7 @@ lr: 0.0003
 train_batch_size: 1024
 test_batch_size: 1024
 train_source_timesteps: 1000
-train_timesteps: 100000
+train_timesteps: 200000
 num_warmup_steps: 2000
 
 # Curriculum-aware LR scheduler settings
@@ -83,8 +83,8 @@ early_stopping_patience: 10
 
 # Speed-oriented diagnostics/evaluation defaults
 progress_interval: 50
-eval_num_train_envs: 4
-eval_num_test_envs: 4
+eval_num_train_envs: 0
+eval_num_test_envs: -1
 in_context_eval_episodes: 100
 
 # Compile tensor-heavy submodules while leaving RAD recurrence eager.

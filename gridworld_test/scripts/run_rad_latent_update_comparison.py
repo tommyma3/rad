@@ -179,7 +179,7 @@ def parse_args():
     parser.add_argument('--pretrain_run_name', default='RAD-pretrain-dktd-seed0')
     parser.add_argument('--gpus', nargs='+', required=True, help='GPU indexes for variants, e.g. --gpus 0 1 2 3.')
     parser.add_argument('--pretrain_gpu', default=None, help='GPU index for shared pretraining. Defaults to the first --gpus entry.')
-    parser.add_argument('--launcher', default='accelerate launch --num_processes 1', help='Launcher for training scripts.')
+    parser.add_argument('--launcher', default='uv run', help='Launcher for training scripts.')
     parser.add_argument('--python', default=sys.executable, help='Python executable for evaluation.')
     parser.add_argument('--eval_episodes', type=int, default=100)
     parser.add_argument('--skip_pretrain', action='store_true')
