@@ -14,15 +14,15 @@ gradient_checkpointing: False
 n_transit: 72          # 120 environment timesteps = 360 transformer tokens
 
 # Compression Settings
-n_compress_tokens: 54   # Must be a multiple of 3 for s/a/r token consistency
+n_compress_tokens: 60   # Must be a multiple of 3 for s/a/r token consistency
 always_use_latent_prefix: True
 short_memory_keep: 10   # Recent uncompressed environment timesteps kept after compression
 compress_n_layers: 4    # Deeper compression for better representation
 compress_n_heads: 4
-latent_update_mode: replace
+latent_update_mode: residual
 
 # Gradient control: keep gradients through the most recent compression rounds.
-max_gradient_rounds: 3
+max_gradient_rounds: 5
 
 # Curriculum settings (None = unlimited)
 max_compressions: null
@@ -66,7 +66,7 @@ curriculum_schedule:
       very_long: 0.25
 
 # Training
-lr: 0.0003
+lr: 0.001
 train_batch_size: 1024
 test_batch_size: 1024
 train_source_timesteps: 1000
@@ -84,7 +84,7 @@ early_stopping_patience: 10
 # Speed-oriented diagnostics/evaluation defaults
 progress_interval: 50
 eval_num_train_envs: 0
-eval_num_test_envs: -1
+eval_num_test_envs: 33
 in_context_eval_episodes: 100
 
 # Compile tensor-heavy submodules while leaving RAD recurrence eager.

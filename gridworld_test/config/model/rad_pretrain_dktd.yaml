@@ -12,14 +12,14 @@ tf_n_inner: 128         # Match rad_dktd.yaml
 n_transit: 72          # 120 environment timesteps = 360 transformer tokens
 
 # Compression Settings (must match rad_dktd.yaml)
-n_compress_tokens: 54   # Must be a multiple of 3 for s/a/r token consistency
+n_compress_tokens: 60   # Must be a multiple of 3 for s/a/r token consistency
 always_use_latent_prefix: True
 compress_n_layers: 4    # Match rad_dktd.yaml
 compress_n_heads: 4     # Match rad_dktd.yaml
 
 # Pre-training specific - longer training for better compression
 pretrain_timesteps: 50000   # More pretraining for better compression
-pretrain_batch_size: 512
+pretrain_batch_size: 1024
 pretrain_lr: 0.0003
 pretrain_warmup_steps: 2000
 
