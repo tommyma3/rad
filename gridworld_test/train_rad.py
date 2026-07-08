@@ -513,12 +513,8 @@ if __name__ == '__main__':
 
     # Setup evaluation environments
     env_name = config['env']
-    train_env_args, test_env_args = SAMPLE_ENVIRONMENT[env_name](config)
-    eval_num_train_envs = int(config.get('eval_num_train_envs', 10))
-    eval_num_test_envs = int(config.get('eval_num_test_envs', 10))
-    train_env_args = train_env_args[:eval_num_train_envs]
-    test_env_args = test_env_args[:eval_num_test_envs]
-    env_args = train_env_args + test_env_args    
+    _, test_env_args = SAMPLE_ENVIRONMENT[env_name](config)
+    env_args = test_env_args
     if len(env_args) == 0:
         raise ValueError('At least one in-context evaluation environment is required')
 
@@ -665,11 +661,26 @@ if __name__ == '__main__':
                 
                 with torch.no_grad():
                     unwrapped = accelerator.unwrap_model(model)
-                    eval_output = unwrapped.evaluate_in_context(
-                        vec_env=envs, 
-                        eval_timesteps=config['horizon'] * in_context_eval_episodes
-                    )
-                    
+                    cpu_rng_state = torch.get_rng_state()
+                    cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                    train_max_compressions = unwrapped.max_compressions
+
+                    try:
+                        torch.manual_seed(0)
+                        torch.cuda.manual_seed(0)
+                        torch.cuda.manual_seed_all(0)
+                        unwrapped.set_curriculum(config.get('max_compressions', None))
+
+                        eval_output = unwrapped.evaluate_in_context(
+                            vec_env=envs,
+                            eval_timesteps=config['horizon'] * in_context_eval_episodes
+                        )
+                    finally:
+                        unwrapped.set_curriculum(train_max_compressions)
+                        torch.set_rng_state(cpu_rng_state)
+                        if cuda_rng_states is not None:
+                            torch.cuda.set_rng_state_all(cuda_rng_states)
+
                     mean_reward = eval_output['reward_episode'].mean()
                     total_compressions = eval_output['total_compressions']
                     
