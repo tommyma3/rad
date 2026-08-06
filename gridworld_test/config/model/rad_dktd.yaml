@@ -57,7 +57,7 @@ curriculum_schedule:
       medium: 0.35
       long: 0.35
       very_long: 0.15
-  - step: 80000
+  - step: 75000
     max_compressions: null
     length_distribution:
       short: 0.15
@@ -70,11 +70,11 @@ lr: 0.001
 train_batch_size: 1024
 test_batch_size: 1024
 train_source_timesteps: 1000
-train_timesteps: 200000
+train_timesteps: 100000
 num_warmup_steps: 2000
 
 # Curriculum-aware LR scheduler settings
-stage_warmup_steps: 1000
+stage_warmup_steps: 2000
 min_lr_ratio: 0.1
 
 # Best model tracking
