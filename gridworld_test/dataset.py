@@ -29,7 +29,7 @@ class ADDataset(Dataset):
         if self.env == 'darkroom':
             n_total_envs = config['grid_size'] ** 2
         elif self.env == 'dktd':
-            n_total_envs = min(200, config['grid_size'] ** 4)  # Limited to 200 tasks
+            n_total_envs = config['grid_size'] ** 4
         else:
             raise ValueError(f'Invalid env: {self.env}')
 
@@ -250,7 +250,7 @@ class RADDataset(Dataset):
         if self.env == 'darkroom':
             n_total_envs = config['grid_size'] ** 2
         elif self.env == 'dktd':
-            n_total_envs = min(200, config['grid_size'] ** 4)  # Limited to 200 tasks
+            n_total_envs = config['grid_size'] ** 4
         else:
             raise ValueError(f'Invalid environment: {self.env}')
 
@@ -547,7 +547,7 @@ class CompressionPretrainDataset(Dataset):
         if self.env == 'darkroom':
             n_total_envs = config['grid_size'] ** 2
         elif self.env == 'dktd':
-            n_total_envs = min(200, config['grid_size'] ** 4)  # Limited to 200 tasks
+            n_total_envs = config['grid_size'] ** 4
         else:
             raise ValueError(f'Invalid env: {self.env}')
 
