@@ -10,6 +10,7 @@ tf_n_head: 4
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 256         # 4x embedding dim
+tf_dim_feedforward: 256 # Effective FFN width used by RAD modules
 gradient_checkpointing: False
 n_transit: 72          # 120 environment timesteps = 360 transformer tokens
 
@@ -66,7 +67,10 @@ curriculum_schedule:
       very_long: 0.25
 
 # Training
-lr: 0.001
+lr: 0.0003              # Backward-compatible fallback learning rate
+ad_lr: 0.0003           # AD transformer, token embeddings, and action head
+compression_lr: 0.0001  # Pretrained compressor and reconstruction decoder
+latent_lr: 0.0003       # Latent prefix and latent-update modules
 train_batch_size: 1024
 test_batch_size: 1024
 train_source_timesteps: 1000

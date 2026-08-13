@@ -9,6 +9,7 @@ tf_n_head: 4
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128
+tf_dim_feedforward: 256  # Effective FFN width used by GPT2Transformer
 n_transit: 100  
 
 # training

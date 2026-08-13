@@ -45,6 +45,7 @@ from env import make_env
 import numpy as np
 import torch.nn.functional as F
 from functools import partial
+from optimizer_utils import build_rad_optimizer_param_groups
 
 
 def configure_torch_runtime(config):
@@ -469,13 +470,22 @@ if __name__ == '__main__':
         print(f'Data loading ended at {load_end_time}')
         print(f'Elapsed time: {load_end_time - load_start_time}')
 
-    # Optimizer for all parameters
+    # Keep the pretrained compressor conservative while allowing the AD core
+    # and newly introduced latent interface to adapt at their own rates.
+    optimizer_param_groups = build_rad_optimizer_param_groups(model, config)
     optimizer = AdamW(
-        model.parameters(), 
-        lr=config['lr'], 
-        betas=(config['beta1'], config['beta2']), 
-        weight_decay=config['weight_decay']
+        optimizer_param_groups,
+        lr=config['lr'],
+        betas=(config['beta1'], config['beta2']),
+        weight_decay=config['weight_decay'],
     )
+    if is_main:
+        for group in optimizer_param_groups:
+            parameter_count = sum(parameter.numel() for parameter in group['params'])
+            print(
+                f"Optimizer group {group['group_name']}: "
+                f"lr={group['lr']:.2e}, parameters={parameter_count:,}"
+            )
     
     # Use curriculum-aware scheduler if curriculum is enabled, otherwise use standard cosine
     if use_curriculum:
@@ -606,6 +616,8 @@ if __name__ == '__main__':
                 writer.add_scalar('train/loss_action', output['loss_action'].item(), step)
                 writer.add_scalar('train/loss_recon', output['loss_recon'].item(), step)
                 writer.add_scalar('train/lr', lr_sched.get_last_lr()[0], step)
+                for group, current_lr in zip(optimizer.param_groups, lr_sched.get_last_lr()):
+                    writer.add_scalar(f"train/lr_{group['group_name']}", current_lr, step)
                 writer.add_scalar('train/acc_action', output['acc_action'].item(), step)
                 writer.add_scalar('train/num_compressions', output['num_compressions'], step)
                 writer.add_scalar('train/avg_compressions', avg_compressions, step)

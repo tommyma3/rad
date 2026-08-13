@@ -9,6 +9,7 @@ tf_n_head: 4            # Match rad_dktd.yaml
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 256         # Match rad_dktd.yaml
+tf_dim_feedforward: 256 # Match the effective RAD FFN width
 n_transit: 72          # 120 environment timesteps = 360 transformer tokens
 
 # Compression Settings (must match rad_dktd.yaml)
