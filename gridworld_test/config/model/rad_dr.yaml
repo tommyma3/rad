@@ -20,6 +20,7 @@ always_use_latent_prefix: True
 short_memory_keep: 5   # Recent uncompressed environment timesteps kept after compression
 compress_n_layers: 3
 compress_n_heads: 4
+latent_update_mode: gru_gate
 
 # Gradient control: keep gradients through the most recent compression rounds.
 max_gradient_rounds: 3
