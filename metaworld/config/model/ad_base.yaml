@@ -1,4 +1,6 @@
 # training
+dynamics: False
+gradient_checkpointing: False
 label_smoothing: 0.0
 flash_attn: True
 ## optimizer

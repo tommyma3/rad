@@ -3,10 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LambdaLR
 import numpy as np
-import torch.nn.functional as F
 import math
-
-from functools import partial
 import matplotlib.pyplot as plt
 
 
@@ -161,20 +158,112 @@ def get_traj_file_name(config):
 
     return path
 
+def configure_torch_runtime(config):
+    matmul_precision = config.get('float32_matmul_precision', 'high')
+    if matmul_precision:
+        torch.set_float32_matmul_precision(matmul_precision)
+        config['float32_matmul_precision'] = matmul_precision
+
+    if config.get('torch_compile', False):
+        try:
+            import importlib
+            inductor_config = importlib.import_module('torch._inductor.config')
+            if 'torch_compile_cudagraphs' in config:
+                inductor_config.triton.cudagraphs = bool(config['torch_compile_cudagraphs'])
+            if config.get('torch_compile_cudagraph_skip_dynamic_graphs', True):
+                inductor_config.triton.cudagraph_skip_dynamic_graphs = True
+                config['torch_compile_cudagraph_skip_dynamic_graphs'] = True
+        except Exception:
+            pass
+
+
+def normalize_compiled_state_dict(state_dict):
+    """Map torch.compile wrapper keys back to the uncompiled checkpoint format."""
+    return {
+        key.replace('._orig_mod.', '.').removeprefix('_orig_mod.'): value
+        for key, value in state_dict.items()
+    }
+
+
+def checkpoint_state_dict(model):
+    """Return a state dict that can be loaded with or without torch.compile."""
+    return normalize_compiled_state_dict(model.state_dict())
+
+
+def maybe_compile_model(model, config, is_main, default_modules=None):
+    """Compile configured submodules while leaving Python-heavy orchestration eager."""
+    if not config.get('torch_compile', False):
+        return model
+
+    if not hasattr(torch, 'compile'):
+        if is_main:
+            print('WARNING: torch.compile requested but unavailable in this PyTorch build.')
+        return model
+
+    if config.get('torch_compile_suppress_errors', True):
+        try:
+            import importlib
+            dynamo = importlib.import_module('torch._dynamo')
+            dynamo.config.suppress_errors = True
+        except Exception as exc:
+            if is_main:
+                print(f'WARNING: Unable to set torch._dynamo suppress_errors: {exc}')
+
+    compile_kwargs = {
+        'mode': config.get('torch_compile_mode', 'reduce-overhead'),
+        'fullgraph': bool(config.get('torch_compile_fullgraph', False)),
+        'dynamic': bool(config.get('torch_compile_dynamic', True)),
+    }
+    backend = config.get('torch_compile_backend')
+    if backend:
+        compile_kwargs['backend'] = backend
+
+    module_names = config.get('torch_compile_modules', default_modules or [])
+    compiled_modules = []
+    for module_name in module_names:
+        if not hasattr(model, module_name):
+            if is_main:
+                print(f'WARNING: Cannot torch.compile missing module: {module_name}')
+            continue
+        module = getattr(model, module_name)
+        setattr(model, module_name, torch.compile(module, **compile_kwargs))
+        compiled_modules.append(module_name)
+
+    if is_main:
+        print(f'torch.compile enabled for: {compiled_modules}')
+        print(f'torch.compile kwargs: {compile_kwargs}')
+
+    return model
+
+
 def ad_collate_fn(batch):
-    """Collate function for AD dataset with continuous actions."""
     res = {}
-    res['query_states'] = torch.tensor(np.array([item['query_states'] for item in batch]), requires_grad=False, dtype=torch.float)
-    res['target_actions'] = torch.tensor(np.array([item['target_actions'] for item in batch]), requires_grad=False, dtype=torch.float)
     res['states'] = torch.tensor(np.array([item['states'] for item in batch]), requires_grad=False, dtype=torch.float)
     res['actions'] = torch.tensor(np.array([item['actions'] for item in batch]), requires_grad=False, dtype=torch.float)
-    res['rewards'] = torch.tensor(np.array([item['rewards'] for item in batch]), requires_grad=False, dtype=torch.float)
+    res['rewards'] = torch.tensor(np.array([item['rewards'] for item in batch]), dtype=torch.float, requires_grad=False)
     res['next_states'] = torch.tensor(np.array([item['next_states'] for item in batch]), requires_grad=False, dtype=torch.float)
+
+    if 'query_states' in batch[0]:
+        res['query_states'] = torch.tensor(np.array([item['query_states'] for item in batch]), requires_grad=False, dtype=torch.float)
+        res['target_actions'] = torch.tensor(np.array([item['target_actions'] for item in batch]), requires_grad=False, dtype=torch.float)
     
+    if 'target_next_states' in batch[0].keys():
+        res['target_next_states'] = torch.tensor(np.array([item['target_next_states'] for item in batch]), dtype=torch.float, requires_grad=False)
+        res['target_rewards'] = torch.tensor(np.array([item['target_rewards'] for item in batch]), dtype=torch.float, requires_grad=False)
+        
     return res
 
 def get_data_loader(dataset, batch_size, config, shuffle=True):
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=ad_collate_fn, num_workers=config['num_workers'], pin_memory=True, persistent_workers=True)
+    num_workers = config['num_workers']
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        collate_fn=ad_collate_fn,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+    )
 
 def log_in_context(values: np.ndarray, max_reward: int, episode_length: int, tag: str, title: str, xlabel: str, ylabel: str, step: int, success=None, writer=None) -> None:
     steps = np.arange(1, len(values[0])+1) * episode_length
@@ -205,3 +294,4 @@ def next_dataloader(dataloader: DataLoader):
     while True:
         for batch in dataloader:
             yield batch
+

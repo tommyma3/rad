@@ -14,8 +14,6 @@ This provides better gradient flow and training stability.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from einops import rearrange
 from torch.utils.checkpoint import checkpoint
 
 
@@ -61,7 +59,8 @@ class CausalSelfAttention(nn.Module):
         
         # QKV projection
         qkv = self.qkv_proj(x)  # (batch, seq_len, 3 * d_model)
-        qkv = rearrange(qkv, 'b s (three h d) -> three b h s d', three=3, h=self.n_heads)
+        qkv = qkv.view(batch_size, seq_len, 3, self.n_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # Each: (batch, n_heads, seq_len, head_dim)
         
         if attention_mask is None:
@@ -72,20 +71,25 @@ class CausalSelfAttention(nn.Module):
                 is_causal=use_causal_mask,
             )
         else:
-            # RAD masks use True for blocked positions; SDPA boolean masks use True for allowed positions.
-            dropout_p = self.attn_dropout.p if self.training else 0.0
+            # RAD masks use True for blocked positions; SDPA boolean masks use
+            # True for allowed positions, so invert after combining masks.
             if attention_mask.dim() == 2:
                 attention_mask = attention_mask.unsqueeze(0).unsqueeze(0)
+            elif attention_mask.dim() == 3:
+                attention_mask = attention_mask.unsqueeze(1)
+
             if use_causal_mask:
                 causal_mask = self.causal_mask[:seq_len, :seq_len].unsqueeze(0).unsqueeze(0)
                 attention_mask = attention_mask.logical_or(causal_mask)
+
+            dropout_p = self.attn_dropout.p if self.training else 0.0
             out = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=attention_mask.logical_not(),
                 dropout_p=dropout_p,
                 is_causal=False,
             )
-        out = rearrange(out, 'b h s d -> b s (h d)')
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
         out = self.out_proj(out)
         out = self.resid_dropout(out)
         
@@ -156,7 +160,7 @@ class GPT2Transformer(nn.Module):
     - Learned positional embeddings
     - Causal masking for autoregressive generation
     - Final LayerNorm before output
-    - Optional gradient checkpointing for memory efficiency
+    - Optional gradient checkpointing for lower activation memory
     """
     def __init__(self, d_model, n_heads, n_layers, max_seq_length=1024, dim_feedforward=None, dropout=0.1):
         super().__init__()
@@ -164,7 +168,7 @@ class GPT2Transformer(nn.Module):
         self.d_model = d_model
         self.n_layers = n_layers
         self.max_seq_length = max_seq_length
-        self.gradient_checkpointing = False  # Disabled by default
+        self.gradient_checkpointing = False
         
         if dim_feedforward is None:
             dim_feedforward = 4 * d_model
@@ -208,15 +212,18 @@ class GPT2Transformer(nn.Module):
             output: (batch, seq_len, d_model)
         """
         seq_len = x.size(1)
+        if seq_len > self.max_seq_length:
+            raise ValueError(
+                f"seq_len ({seq_len}) exceeds max_seq_length ({self.max_seq_length})"
+            )
         
         # Add positional embeddings
         x = x + self.pos_embedding[:, :seq_len, :]
         x = self.dropout(x)
         
-        # Transformer blocks (supports gradient checkpointing)
+        # Pass through transformer blocks
         for block in self.blocks:
             if self.gradient_checkpointing and self.training:
-                # Use gradient checkpointing to save memory
                 x = checkpoint(block, x, attention_mask, use_causal_mask, use_reentrant=False)
             else:
                 x = block(x, attention_mask=attention_mask, use_causal_mask=use_causal_mask)
@@ -225,11 +232,11 @@ class GPT2Transformer(nn.Module):
         x = self.ln_f(x)
         
         return x
-    
+
     def enable_gradient_checkpointing(self):
-        """Enable gradient checkpointing to reduce memory at cost of compute."""
+        """Enable checkpointing to reduce activation memory during training."""
         self.gradient_checkpointing = True
-    
+
     def disable_gradient_checkpointing(self):
         """Disable gradient checkpointing."""
         self.gradient_checkpointing = False
@@ -248,6 +255,12 @@ class GPT2Transformer(nn.Module):
         Returns:
             output: (batch, seq_len, d_model)
         """
+        seq_len = x.size(1)
+        if seq_len > self.max_seq_length:
+            raise ValueError(
+                f"seq_len ({seq_len}) exceeds max_seq_length ({self.max_seq_length})"
+            )
+
         # Gather positional embeddings based on position indices
         pos_emb = self.pos_embedding.squeeze(0)[positions]  # (batch, seq_len, d_model)
         
@@ -255,7 +268,10 @@ class GPT2Transformer(nn.Module):
         x = self.dropout(x)
         
         for block in self.blocks:
-            x = block(x, attention_mask=attention_mask, use_causal_mask=use_causal_mask)
+            if self.gradient_checkpointing and self.training:
+                x = checkpoint(block, x, attention_mask, use_causal_mask, use_reentrant=False)
+            else:
+                x = block(x, attention_mask=attention_mask, use_causal_mask=use_causal_mask)
         
         x = self.ln_f(x)
         

@@ -31,7 +31,6 @@ class CrossAttentionLayer(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         
         self.dropout = nn.Dropout(dropout)
-        self.scale = self.head_dim ** -0.5
         
     def forward(self, queries, context):
         """
@@ -43,8 +42,6 @@ class CrossAttentionLayer(nn.Module):
             output: (batch, n_queries, d_model)
         """
         batch_size, n_queries, _ = queries.shape
-        context_len = context.shape[1]
-        
         # Project queries, keys, values
         q = self.q_proj(queries)  # (batch, n_queries, d_model)
         k = self.k_proj(context)  # (batch, context_len, d_model)
@@ -55,13 +52,14 @@ class CrossAttentionLayer(nn.Module):
         k = rearrange(k, 'b s (h d) -> b h s d', h=self.n_heads)
         v = rearrange(v, 'b s (h d) -> b h s d', h=self.n_heads)
         
-        # Compute attention scores
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (batch, heads, n_queries, context_len)
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-        
-        # Apply attention to values
-        out = torch.matmul(attn, v)  # (batch, heads, n_queries, head_dim)
+        dropout_p = self.dropout.p if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            dropout_p=dropout_p,
+            is_causal=False,
+        )
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.out_proj(out)
         
@@ -130,7 +128,7 @@ class CompressionTransformer(nn.Module):
     - Multiple layers of [Self-Attention -> Cross-Attention -> FFN]
     - Output: latent tokens that represent compressed information
     """
-    def __init__(self, d_model, n_heads, n_layers, n_compress_tokens, dim_feedforward=None, dropout=0.1):
+    def __init__(self, d_model, n_heads, n_layers, n_compress_tokens, dim_feedforward=None, dropout=0.1, max_context_length=2048):
         super().__init__()
         
         self.d_model = d_model
@@ -143,7 +141,7 @@ class CompressionTransformer(nn.Module):
         self.compress_queries = nn.Parameter(torch.randn(1, n_compress_tokens, d_model) * 0.02)
         
         # Positional embedding for context (will be added to input)
-        self.max_context_length = 2048  # Maximum context length
+        self.max_context_length = max_context_length
         self.context_pos_embedding = nn.Parameter(torch.randn(1, self.max_context_length, d_model) * 0.02)
         
         # Compression layers
@@ -195,8 +193,9 @@ class ReconstructionDecoder(nn.Module):
         super().__init__()
         
         self.d_model = d_model
-        # max_seq_length for variable-length reconstruction
-        self.max_seq_length = max_seq_length
+        # max_seq_length for variable-length reconstruction (finetune)
+        # 1024 covers max_context_length=800 + buffer
+        self.max_seq_length = max(max_seq_length, 1024)
         
         if dim_feedforward is None:
             dim_feedforward = d_model * 4

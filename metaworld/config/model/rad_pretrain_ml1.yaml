@@ -9,11 +9,13 @@ tf_n_head: 8
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 256
+tf_dim_feedforward: 256
 n_transit: 200
 
 # Compression Settings (must match rad_ml1.yaml)
-n_compress_tokens: 64
-short_memory_keep: 64
+n_compress_tokens: 60
+always_use_latent_prefix: True
+short_memory_keep: 20
 
 compress_n_layers: 3
 compress_n_heads: 4
@@ -30,5 +32,14 @@ train_n_seed: 50
 train_n_stream: 100
 
 learn_var: True
+
+torch_compile: True
+torch_compile_modules:
+  - compression_transformer
+  - reconstruction_decoder
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
 
 num_workers: 4

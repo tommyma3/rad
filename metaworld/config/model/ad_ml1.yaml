@@ -9,6 +9,7 @@ tf_n_head: 8
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 256
+tf_dim_feedforward: 256
 n_transit: 1000  # Reduced from 1000 to avoid OOM
 
 # training
@@ -26,6 +27,19 @@ train_n_stream: 100
 
 n_train_envs_per_task: 5
 n_test_envs_per_task: 10
+test_n_seed: 10
+
+# Compile the transformer while keeping training/evaluation loops eager.
+torch_compile: True
+torch_compile_modules:
+  - transformer
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
+torch_compile_cudagraphs: False
+
+eval_num_test_envs: 4
 
 num_workers: 2
 

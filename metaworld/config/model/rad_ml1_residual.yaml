@@ -1,0 +1,6 @@
+include: config/model/rad_ml1.yaml
+
+latent_update_mode: residual
+run_name: RAD-ml1-window-open-v3-seed0-residual
+experiment_name: rad_latent_update_comparison
+

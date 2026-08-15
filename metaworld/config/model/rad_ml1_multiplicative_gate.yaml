@@ -1,0 +1,6 @@
+include: config/model/rad_ml1.yaml
+
+latent_update_mode: multiplicative_gate
+run_name: RAD-ml1-window-open-v3-seed0-multiplicative_gate
+experiment_name: rad_latent_update_comparison
+

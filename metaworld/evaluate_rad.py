@@ -20,9 +20,11 @@ import numpy as np
 
 from env import get_ml1_test_env_fns
 from model import MODEL
+from utils import normalize_compiled_state_dict
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
+CHECKPOINT_FORMAT = 'metaworld-sar-v1'
 
 
 def _load_ckpt_with_compat(ckpt_path, device):
@@ -77,16 +79,19 @@ if __name__ == '__main__':
             raise ValueError('No checkpoint found.')
     
     config['device'] = device
+    if ckpt.get('format') != CHECKPOINT_FORMAT:
+        raise ValueError(f'{ckpt_path} uses the legacy packed-transition checkpoint format')
     
     model_name = config['model']
     model = MODEL[model_name](config).to(device)
-    model.load_state_dict(ckpt['model'], strict=False)
+    model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
     model.eval()
 
     print(f"Model: {model_name}")
     print(f"Task: {config['task']}")
     print(f"Max sequence length: {config['n_transit']}")
     print(f"Compression tokens: {config.get('n_compress_tokens', 'N/A')}")
+    print(f"Latent update mode: {config.get('latent_update_mode', 'replace')}")
 
     test_envs = get_ml1_test_env_fns(config, max_envs_per_task=None)
 

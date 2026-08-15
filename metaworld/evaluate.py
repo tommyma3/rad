@@ -20,10 +20,12 @@ import os.path as path
 
 from env import get_ml1_test_env_fns
 from model import MODEL
+from utils import normalize_compiled_state_dict
 from stable_baselines3.common.vec_env import DummyVecEnv
 import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
+CHECKPOINT_FORMAT = 'metaworld-sar-v1'
 
 
 def parse_arguments():
@@ -31,6 +33,7 @@ def parse_arguments():
     parser.add_argument('--ckpt_dir', type=str, required=True, help='Path to checkpoint directory')
     parser.add_argument('--seed', type=int, default=0, help='Random seed')
     parser.add_argument('--eval_timesteps', type=int, default=None, help='Evaluation timesteps (default: test_source_timesteps from config)')
+    parser.add_argument('--use_best', action='store_true', help='Use best-model.pt when available')
     args = parser.parse_args()
     return args
 
@@ -42,15 +45,19 @@ if __name__ == '__main__':
     torch.backends.cudnn.deterministic = True
 
     ckpt_dir = args.ckpt_dir
+    best_model_path = path.join(ckpt_dir, 'best-model.pt')
     ckpt_paths = sorted(glob(path.join(ckpt_dir, 'ckpt-*.pt')))
-
-    if len(ckpt_paths) > 0:
+    if args.use_best and path.exists(best_model_path):
+        ckpt_path = best_model_path
+    elif ckpt_paths:
         ckpt_path = ckpt_paths[-1]
-        ckpt = torch.load(ckpt_path, map_location=device)
-        print(f'Checkpoint loaded from {ckpt_path}')
-        config = ckpt['config']
     else:
         raise ValueError('No checkpoint found.')
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if ckpt.get('format') != CHECKPOINT_FORMAT:
+        raise ValueError(f'{ckpt_path} uses the legacy packed-transition checkpoint format')
+    print(f'Checkpoint loaded from {ckpt_path}')
+    config = ckpt['config']
     
     config['device'] = device
     
@@ -58,7 +65,7 @@ if __name__ == '__main__':
     model = MODEL[model_name](config).to(device)
     # Some checkpoints include obs/action bounds as buffers saved at save time;
     # allow extra keys and set the real spaces after env creation.
-    model.load_state_dict(ckpt['model'], strict=False)
+    model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
     model.eval()
 
     # Define environments for evaluation. Standalone evaluation uses all test tasks.

@@ -1,5 +1,5 @@
 """
-Fine-tuning script for Recurrent Algorithm Distillation (RAD) on Meta-world.
+Fine-tuning script for Recurrent Algorithm Distillation (RAD).
 
 This script fine-tunes the full RAD system (compression + AD) after pre-training
 the compression transformer. Supports multi-GPU training and curriculum learning.
@@ -19,8 +19,6 @@ from datetime import datetime
 import os
 import os.path as path
 from glob import glob
-from modulefinder import ModuleFinder
-import shutil
 import argparse
 import gc
 
@@ -36,7 +34,7 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset import RADDataset, ADDataset
 from env import get_ml1_test_env_fns
 from model import MODEL
-from utils import get_config, next_dataloader, get_curriculum_aware_scheduler, log_in_context
+from utils import get_config, next_dataloader, get_curriculum_aware_scheduler
 from transformers import get_cosine_schedule_with_warmup
 
 import multiprocessing
@@ -44,15 +42,31 @@ from tqdm import tqdm
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 import numpy as np
-import torch.nn.functional as F
-from functools import partial
+from optimizer_utils import build_rad_optimizer_param_groups
+
+CHECKPOINT_FORMAT = 'metaworld-sar-v1'
 
 
-def rad_collate_fn(batch, dim_actions):
+def configure_torch_runtime(config):
+    matmul_precision = config.get('float32_matmul_precision', 'high')
+    if matmul_precision:
+        torch.set_float32_matmul_precision(matmul_precision)
+        config['float32_matmul_precision'] = matmul_precision
+
+    if config.get('torch_compile', False) and config.get('torch_compile_cudagraph_skip_dynamic_graphs', True):
+        try:
+            import importlib
+            inductor_config = importlib.import_module('torch._inductor.config')
+            inductor_config.triton.cudagraph_skip_dynamic_graphs = True
+            config['torch_compile_cudagraph_skip_dynamic_graphs'] = True
+        except Exception:
+            pass
+
+
+def rad_collate_fn(batch):
     """
     Collate function for variable-length RAD dataset.
     Handles sequences of different lengths by padding.
-    For Meta-world with continuous actions.
     """
     # Find max context length in batch
     max_context_len = max(item['states'].shape[0] for item in batch)
@@ -62,60 +76,58 @@ def rad_collate_fn(batch, dim_actions):
     
     # Initialize padded arrays
     states = np.zeros((batch_size, max_context_len, dim_state), dtype=np.float32)
-    actions = np.zeros((batch_size, max_context_len, dim_actions), dtype=np.float32)
+    dim_action = batch[0]['actions'].shape[1]
+    actions = np.zeros((batch_size, max_context_len, dim_action), dtype=np.float32)
     rewards = np.zeros((batch_size, max_context_len), dtype=np.float32)
-    next_states = np.zeros((batch_size, max_context_len, dim_state), dtype=np.float32)
     
-    query_states = np.empty((batch_size, dim_state), dtype=np.float32)
-    target_actions = np.empty((batch_size, dim_actions), dtype=np.float32)
-    context_lengths = np.empty(batch_size, dtype=np.int64)
+    context_lengths = []
     
     for i, item in enumerate(batch):
         ctx_len = item['states'].shape[0]
         states[i, :ctx_len] = item['states']
         actions[i, :ctx_len] = item['actions']
         rewards[i, :ctx_len] = item['rewards']
-        next_states[i, :ctx_len] = item['next_states']
         
-        query_states[i] = item['query_states']
-        target_actions[i] = item['target_actions']
-        context_lengths[i] = ctx_len
+        context_lengths.append(ctx_len)
     
     res = {
-        'query_states': torch.from_numpy(query_states),
-        'target_actions': torch.from_numpy(target_actions),  # Continuous actions
-        'states': torch.from_numpy(states),
-        'actions': torch.from_numpy(actions),  # Continuous actions
-        'rewards': torch.from_numpy(rewards),
-        'next_states': torch.from_numpy(next_states),
-        'context_lengths': torch.from_numpy(context_lengths),  # For masking
+        'states': torch.tensor(states, requires_grad=False, dtype=torch.float),
+        'actions': torch.tensor(actions, requires_grad=False, dtype=torch.float),
+        'rewards': torch.tensor(rewards, dtype=torch.float, requires_grad=False),
+        'context_lengths': torch.tensor(context_lengths, dtype=torch.long),  # For masking
     }
     
     return res
 
 
-def get_rad_data_loader(dataset, batch_size, config, shuffle=True, distributed=False, use_length_grouping=True):
-    """Data loader for RAD with variable-length collate function.
-    
-    Args:
-        dataset: RADDataset instance
-        batch_size: Number of samples per batch
-        config: Configuration dict
-        shuffle: Whether to shuffle data
-        distributed: Whether using distributed training
-        use_length_grouping: If True, use LengthGroupedSampler to minimize padding
-    """
+def get_rad_data_loader(dataset, batch_size, config, shuffle=True, use_length_grouping=True):
+    """Data loader for RAD with variable-length collate function."""
     from torch.utils.data import DataLoader
-    from dataset import LengthGroupedSampler
+    from dataset import CompressionBucketBatchSampler, LengthGroupedSampler
     
-    collate_fn = partial(rad_collate_fn, dim_actions=config['dim_actions'])
-    
+    collate_fn = rad_collate_fn
     num_workers = config.get('num_workers', 0)
-    pin_memory = torch.cuda.is_available()
-    persistent_workers = num_workers > 0
-    
+    batching_strategy = config.get('rad_batching_strategy', 'length_grouped')
+
+    if batching_strategy not in ('compression_buckets', 'length_grouped', 'variable'):
+        raise ValueError(f'Unknown RAD batching strategy: {batching_strategy}')
+
+    if batching_strategy == 'compression_buckets':
+        sampler = CompressionBucketBatchSampler(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
+        )
+
     if use_length_grouping:
-        # Use length-grouped sampler to reduce padding
         sampler = LengthGroupedSampler(
             dataset=dataset,
             batch_size=batch_size,
@@ -123,47 +135,21 @@ def get_rad_data_loader(dataset, batch_size, config, shuffle=True, distributed=F
             drop_last=False,
         )
         return DataLoader(
-            dataset, 
+            dataset,
             batch_sampler=sampler,
-            collate_fn=collate_fn, 
-            num_workers=num_workers, 
-            persistent_workers=persistent_workers,
-            pin_memory=pin_memory,
-        )
-    else:
-        return DataLoader(
-            dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle, 
-            collate_fn=collate_fn, 
-            num_workers=num_workers, 
-            persistent_workers=persistent_workers,
-            pin_memory=pin_memory,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
         )
 
-
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--alg-config', '-ac', required=False, default='./config/algorithm/ppo_ml1.yaml', help="Algorithm config")
-    parser.add_argument('--env-config', '-ec', required=False, default='./config/env/ml1.yaml', help="Environment config")
-    parser.add_argument('--model-config', '-mc', required=False, default='./config/model/rad_ml1.yaml', help="Model config")
-    parser.add_argument('--log-dir', '-l', required=False, default='./runs', help="Log directory")
-    parser.add_argument('--traj-dir', '-t', required=False, default='./datasets', help="Trajectory directory")
-    parser.add_argument('--no-backup', '-nb', required=False, default=False, help="Save code", action='store_true')
-    parser.add_argument('--override', '-o', default='')
-    parser.add_argument('--pretrain_ckpt', type=str, default=None,
-                       help='Path to pre-trained compression checkpoint')
-    parser.add_argument('--no_curriculum', action='store_true',
-                       help='Disable curriculum learning')
-    parser.add_argument('--resume', required=False, default=False, help="Resume train", action='store_true')
-    parser.add_argument('--mixed-precision', '-m', required=False, default='bf16')
-    parser.add_argument('--disable-tqdm', '-d', required=False, default=False, action='store_true')
-    parser.add_argument('--gradient-accumulation-steps', '-ga', type=int, default=1,
-                       help='Number of gradient accumulation steps (effective batch = batch_size * ga_steps * n_gpus)')
-    parser.add_argument('--gradient-checkpointing', '-gc', action='store_true',
-                       help='Enable gradient checkpointing to reduce memory (slower but uses less VRAM)')
-    args = parser.parse_args()
-    return args
+    return DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        collate_fn=collate_fn, 
+        num_workers=num_workers, 
+        persistent_workers=num_workers > 0
+    )
 
 # Curriculum schedule: (step, max_compressions)
 DEFAULT_CURRICULUM = [
@@ -233,157 +219,158 @@ def get_curriculum_stage(step, curriculum):
     return stage
 
 
-if __name__ == '__main__':
-    multiprocessing.set_start_method('spawn', force=True)
-    args = parse_arguments()
+def normalize_compiled_state_dict(state_dict):
+    """Map torch.compile wrapper keys back to the uncompiled checkpoint format."""
+    return {
+        key.replace('._orig_mod.', '.').removeprefix('_orig_mod.'): value
+        for key, value in state_dict.items()
+    }
 
-    # Load and update config
-    config = get_config(args.env_config)
-    config.update(get_config(args.alg_config))
-    config.update(get_config(args.model_config))
 
-    # Override options
-    for option in args.override.split('|'):
-        if not option:
+def checkpoint_state_dict(model):
+    """Return a state dict that can be loaded with or without torch.compile."""
+    return normalize_compiled_state_dict(model.state_dict())
+
+
+def maybe_compile_model(model, config, is_main):
+    """Compile tensor-heavy RAD submodules while leaving Python recurrence eager."""
+    if not config.get('torch_compile', False):
+        return model
+
+    if not hasattr(torch, 'compile'):
+        if is_main:
+            print('WARNING: torch.compile requested but unavailable in this PyTorch build.')
+        return model
+
+    if config.get('torch_compile_suppress_errors', True):
+        try:
+            import importlib
+            dynamo = importlib.import_module('torch._dynamo')
+            dynamo.config.suppress_errors = True
+        except Exception as exc:
+            if is_main:
+                print(f'WARNING: Unable to set torch._dynamo suppress_errors: {exc}')
+
+    compile_kwargs = {
+        'mode': config.get('torch_compile_mode', 'reduce-overhead'),
+        'fullgraph': bool(config.get('torch_compile_fullgraph', False)),
+        'dynamic': bool(config.get('torch_compile_dynamic', True)),
+    }
+    backend = config.get('torch_compile_backend')
+    if backend:
+        compile_kwargs['backend'] = backend
+
+    module_names = config.get(
+        'torch_compile_modules',
+        ['ad_transformer', 'compression_transformer'],
+    )
+    compiled_modules = []
+    for module_name in module_names:
+        if not hasattr(model, module_name):
+            if is_main:
+                print(f'WARNING: Cannot torch.compile missing module: {module_name}')
             continue
-        address, value = option.split('=')
-        keys = address.split('.')
-        here = config
-        for key in keys[:-1]:
-            if key not in here:
-                here[key] = {}
-            here = here[key]
-        if keys[-1] not in here:
-            print(f'Warning: {address} is not defined in config file.')
-        here[keys[-1]] = yaml.load(value, Loader=yaml.FullLoader)
+        module = getattr(model, module_name)
+        setattr(model, module_name, torch.compile(module, **compile_kwargs))
+        compiled_modules.append(module_name)
+
+    if is_main:
+        print(f'torch.compile enabled for: {compiled_modules}')
+        print(f'torch.compile kwargs: {compile_kwargs}')
+
+    return model
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pretrain_ckpt', type=str, default=None,
+                       help='Path to pre-trained compression checkpoint')
+    parser.add_argument('--no_curriculum', action='store_true',
+                       help='Disable curriculum learning')
+    parser.add_argument('--config', type=str, default='rad_ml1',
+                       help='Model config name (without .yaml extension)')
+    args = parser.parse_args()
+    
+    multiprocessing.set_start_method('spawn', force=True)
+    
+    config = get_config('./config/env/ml1.yaml')
+    config.update(get_config('./config/algorithm/ppo_ml1.yaml'))
+    config.update(get_config(f'./config/model/{args.config}.yaml'))
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
 
-    log_dir = path.join(args.log_dir, f"RAD-ml1-{config['task']}-var{config.get('learn_var', False)}")
+    runs_root = config.get('runs_root', './runs')
+    default_run_name = f"RAD-ml1-{config['task']}-seed{config['mw_seed']}"
+    run_name = config.get('run_name', default_run_name)
+    log_dir = path.join(runs_root, run_name)
+    
+    # Check if already exists
+    config_save_path = path.join(log_dir, 'config.yaml')
+    try:
+        with open(config_save_path, 'r') as f:
+            f.read(1)
+            config_exists = True
+    except FileNotFoundError:
+        config_exists = False
+
+    if config_exists:
+        print(f'WARNING: {log_dir} already exists. Will resume if checkpoint exists.')
     
     config['log_dir'] = log_dir
-    config_save_path = path.join(config['log_dir'], 'config.yaml')
-    
-    traj_dir = path.join(args.traj_dir, config['task'])
-    config['traj_dir'] = traj_dir
-    config['mixed_precision'] = args.mixed_precision
+    config['traj_dir'] = './datasets'
+    config['mixed_precision'] = config.get('mixed_precision', 'bf16')
+    configure_torch_runtime(config)
+    progress_interval = max(1, int(config.get('progress_interval', 50)))
+    in_context_eval_episodes = max(1, int(config.get('in_context_eval_episodes', 100)))
 
     # Curriculum settings - load from config or use default
     use_curriculum = not args.no_curriculum
     curriculum = get_curriculum_from_config(config) if use_curriculum else [(0, None, DEFAULT_LENGTH_DISTRIBUTIONS[None])]
 
-    # Initialize Accelerator for multi-GPU with gradient accumulation
-    gradient_accumulation_steps = args.gradient_accumulation_steps
+    # Initialize accelerator for multi-GPU support
+    accelerator = Accelerator(
+        mixed_precision=config['mixed_precision'],
+        gradient_accumulation_steps=config.get('gradient_accumulation_steps', 1),
+    )
     
-    if args.mixed_precision == 'bf16' or args.mixed_precision == 'fp16':
-        accelerator = Accelerator(
-            mixed_precision=args.mixed_precision,
-            gradient_accumulation_steps=gradient_accumulation_steps
-        )
-    elif args.mixed_precision == 'fp32':
-        accelerator = Accelerator(
-            mixed_precision='no',
-            gradient_accumulation_steps=gradient_accumulation_steps
-        )
-    else:
-        raise ValueError(f'Unsupported mixed precision: {args.mixed_precision}')
-
-    # Debug print immediately after accelerator creation
-    print(f'[Process {accelerator.process_index}] Accelerator initialized. Device: {accelerator.device}', flush=True)
-
     config['device'] = accelerator.device
     
-    # Only main process handles logging and checkpointing
+    # Only main process prints and logs
     is_main = accelerator.is_main_process
-
-    # Synchronize all processes before file operations
-    accelerator.wait_for_everyone()
-
-    # Prevent overwrite: check only on main process
-    config_exists = False
-    if is_main:
-        try:
-            with open(config_save_path, 'r') as f:
-                f.read(1)
-                config_exists = True
-        except FileNotFoundError:
-            config_exists = False
-        
-        if config_exists and not args.resume:
-            print(f'WARNING: {log_dir} already exists. Skipping...')
-    
-    # Broadcast the decision to all processes
-    accelerator.wait_for_everyone()
-    
-    # Use a simple file check that all processes can agree on
-    if path.exists(config_save_path) and not args.resume:
-        # All processes must exit together to avoid deadlock
-        accelerator.wait_for_everyone()
-        exit(0)
     
     if is_main:
         os.makedirs(log_dir, exist_ok=True)
         writer = SummaryWriter(log_dir, flush_secs=15)
         print(f'Using Device: {config["device"]}')
         print(f'Number of processes: {accelerator.num_processes}')
-        print(f'Mixed precision: {args.mixed_precision}')
-        print(f'Gradient accumulation steps: {gradient_accumulation_steps}')
-        effective_batch = config['train_batch_size'] * accelerator.num_processes * gradient_accumulation_steps
-        print(f'Effective batch size: {config["train_batch_size"]} * {accelerator.num_processes} * {gradient_accumulation_steps} = {effective_batch}')
-        print(f'Gradient checkpointing: {args.gradient_checkpointing}')
         print(f'Curriculum enabled: {use_curriculum}')
         print(f'Curriculum schedule: {curriculum}')
         print(f'Max context length: {config.get("max_context_length", 800)}')
         print(f'Train source timesteps: {config.get("train_source_timesteps", 1000)}')
         print(f'Train timesteps: {config.get("train_timesteps", 100000)}')
+        print(f'RAD batching strategy: {config.get("rad_batching_strategy", "length_grouped")}')
         
         # Save config
+        config_save_path = path.join(log_dir, 'config.yaml')
         with open(config_save_path, 'w') as f:
             yaml.dump(config, f)
-        print(f'Config saved to {config_save_path}')
-
-        # Save code
-        if not args.no_backup:
-            code_dir = path.join(config['log_dir'], 'code_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
-            mf = ModuleFinder([os.getcwd()])
-            mf.run_script(__file__)
-            for name, module in mf.modules.items():
-                if module.__file__ is None:
-                    continue
-                rel_path = path.relpath(module.__file__)
-                new_path = path.join(code_dir, rel_path)
-                new_dirname = path.dirname(new_path)
-                os.makedirs(new_dirname, mode=0o750, exist_ok=True)
-                shutil.copy2(rel_path, new_path)
-            print(f'Code saved to {code_dir}')
-
-    # Synchronize all processes after main-only initialization
-    # This ensures all processes start model creation together
-    print(f'[Process {accelerator.process_index}] Waiting for initialization to complete...', flush=True)
-    accelerator.wait_for_everyone()
-    print(f'[Process {accelerator.process_index}] Initialization complete.', flush=True)
 
     # Create model
-    print(f'[Process {accelerator.process_index}] Creating model...', flush=True)
     model = MODEL[config['model']](config)
-    print(f'[Process {accelerator.process_index}] Model created.', flush=True)
-
-    # Enable gradient checkpointing (saves memory, slower)
-    if args.gradient_checkpointing:
-        model.enable_gradient_checkpointing()
-        if is_main:
-            print('Gradient checkpointing enabled - will use less memory but be ~20% slower')
 
     # Load pre-trained compression if available
-    print(f'[Process {accelerator.process_index}] Loading pre-trained compression...', flush=True)
     if args.pretrain_ckpt:
         if is_main:
             print(f'Loading pre-trained compression from {args.pretrain_ckpt}')
         model.load_pretrained_compression(args.pretrain_ckpt)
     else:
         # Try to find pre-trained checkpoint automatically
-        pretrain_dir = path.join('./runs', f"RAD-pretrain-ml1-{config['task']}")
+        pretrain_run_name = config.get(
+            'pretrain_run_name',
+            f"RAD-pretrain-ml1-{config['task']}",
+        )
+        pretrain_dir = path.join(runs_root, pretrain_run_name)
         pretrain_path = path.join(pretrain_dir, 'pretrain-final.pt')
         if path.exists(pretrain_path):
             if is_main:
@@ -391,64 +378,77 @@ if __name__ == '__main__':
             model.load_pretrained_compression(pretrain_path)
         elif is_main:
             print('WARNING: No pre-trained compression found. Training from scratch.')
-    
-    print(f'[Process {accelerator.process_index}] Pre-trained compression loaded.', flush=True)
-    
-    # Synchronize before data loading
-    accelerator.wait_for_everyone()
+
+    step = 0
+    resume_ckpt = None
+    ckpt_paths = sorted(glob(path.join(config['log_dir'], 'ckpt-*.pt')))
+    if len(ckpt_paths) > 0:
+        ckpt_path = ckpt_paths[-1]
+        resume_ckpt = torch.load(ckpt_path, map_location=config['device'])
+        if resume_ckpt.get('format') != CHECKPOINT_FORMAT:
+            raise ValueError(
+                f'{ckpt_path} uses the legacy packed-transition checkpoint format; '
+                'start a new run for the state/action/reward token implementation'
+            )
+        load_result = model.load_state_dict(
+            normalize_compiled_state_dict(resume_ckpt['model']),
+            strict=False,
+        )
+        step = resume_ckpt['step']
+        if is_main:
+            print(f'Model checkpoint loaded from {ckpt_path}')
+            if load_result.missing_keys:
+                print(f'Missing model keys initialized from current config: {load_result.missing_keys}')
+            if load_result.unexpected_keys:
+                print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
+
+    model = maybe_compile_model(model, config, is_main)
 
     if is_main:
         load_start_time = datetime.now()
         print(f'Data loading started at {load_start_time}')
 
-    # Sequential data loading: load one process at a time to avoid HDF5 conflicts
-    # This is slower but guarantees no file locking issues
-    for proc_idx in range(accelerator.num_processes):
-        if accelerator.process_index == proc_idx:
-            print(f'[Process {accelerator.process_index}] Creating train dataset...', flush=True)
-            # Create datasets
-            train_dataset = RADDataset(
-                config, 
-                traj_dir, 
-                'train', 
-                config['train_n_seed'],
-                config['train_n_stream'], 
-                config['train_source_timesteps']
-            )
-            
-            print(f'[Process {accelerator.process_index}] Train dataset created.', flush=True)
-            
-            if is_main:
-                print(f'Dataset sequence length: {train_dataset.seq_length}')
-                print(f'Number of training histories: {train_dataset.n_histories}')
-            
-            print(f'[Process {accelerator.process_index}] Creating test dataset...', flush=True)
-            # Use standard AD dataset for testing (fixed length)
-            test_dataset = ADDataset(
-                config, 
-                traj_dir, 
-                'test', 
-                1,
-                1, 
-                config['train_source_timesteps']
-            )
-            print(f'[Process {accelerator.process_index}] Test dataset created.', flush=True)
-        
-        # Wait for current process to finish before next one starts
-        accelerator.wait_for_everyone()
+    # Create datasets
+    train_dataset = RADDataset(
+        config, 
+        config['traj_dir'], 
+        'train', 
+        config['train_n_stream'], 
+        config['train_source_timesteps'],
+        n_seed=config.get('train_n_seed'),
+    )
     
-    print(f'[Process {accelerator.process_index}] Creating dataloaders...', flush=True)
+    if is_main:
+        print(f'Dataset sequence length: {train_dataset.seq_length}')
+        print(f'Number of training histories: {train_dataset.n_histories}')
+
+    if use_curriculum:
+        initial_max_comp = get_curriculum_max_compressions(step, curriculum)
+        model.set_curriculum(initial_max_comp)
+        train_dataset.update_max_compressions(initial_max_comp)
+        train_dataset.update_length_distribution(get_curriculum_length_distribution(step, curriculum))
+    else:
+        train_dataset.update_max_compressions(None)
+    
+    # Use standard AD dataset for testing (fixed length)
+    test_dataset = ADDataset(
+        config, 
+        config['traj_dir'], 
+        'test', 
+        1, 
+        config.get('test_source_timesteps', config['train_source_timesteps']),
+        n_seed=config.get('test_n_seed', 1),
+    )
 
     train_dataloader = get_rad_data_loader(
         train_dataset, 
         batch_size=config['train_batch_size'], 
         config=config, 
-        shuffle=True,
-        distributed=(accelerator.num_processes > 1)
+        shuffle=True
     )
-    # NOTE: Wrap dataloader after accelerator.prepare()
+    train_dataloader = next_dataloader(train_dataloader)
 
-    # Test dataloader: fewer workers, no persistence to avoid leaks
+    # Standard data loader for test - use fewer workers and no persistence to avoid leaks
     from torch.utils.data import DataLoader
     from utils import ad_collate_fn
     
@@ -456,7 +456,7 @@ if __name__ == '__main__':
         test_dataset, 
         batch_size=config['test_batch_size'], 
         shuffle=False,
-        collate_fn=ad_collate_fn,  # ad_collate_fn doesn't need dim_actions
+        collate_fn=ad_collate_fn,
         num_workers=0,  # Use main process to avoid worker issues during evaluation
         persistent_workers=False
     )
@@ -466,26 +466,24 @@ if __name__ == '__main__':
         print(f'Data loading ended at {load_end_time}')
         print(f'Elapsed time: {load_end_time - load_start_time}')
 
-    print(f'[Process {accelerator.process_index}] Creating optimizer...', flush=True)
-    
-    # Optimizer for all parameters
-    optimizer_kwargs = dict(
+    # Keep the pretrained compressor conservative while allowing the AD core
+    # and newly introduced latent interface to adapt at their own rates.
+    optimizer_param_groups = build_rad_optimizer_param_groups(model, config)
+    optimizer = AdamW(
+        optimizer_param_groups,
         lr=config['lr'],
         betas=(config['beta1'], config['beta2']),
         weight_decay=config['weight_decay'],
     )
-    if torch.cuda.is_available():
-        optimizer_kwargs['fused'] = True
-    try:
-        optimizer = AdamW(model.parameters(), **optimizer_kwargs)
-    except (TypeError, RuntimeError):
-        optimizer_kwargs.pop('fused', None)
-        optimizer_kwargs['foreach'] = torch.cuda.is_available()
-        optimizer = AdamW(model.parameters(), **optimizer_kwargs)
+    if is_main:
+        for group in optimizer_param_groups:
+            parameter_count = sum(parameter.numel() for parameter in group['params'])
+            print(
+                f"Optimizer group {group['group_name']}: "
+                f"lr={group['lr']:.2e}, parameters={parameter_count:,}"
+            )
     
-    print(f'[Process {accelerator.process_index}] Optimizer created. Creating LR scheduler...', flush=True)
-    
-    # Use curriculum-aware scheduler if enabled; else use cosine
+    # Use curriculum-aware scheduler if curriculum is enabled, otherwise use standard cosine
     if use_curriculum:
         lr_sched = get_curriculum_aware_scheduler(
             optimizer=optimizer,
@@ -505,124 +503,40 @@ if __name__ == '__main__':
         )
         if is_main:
             print(f'Using standard cosine LR scheduler')
-    
-    step = 0
-    
-    print(f'[Process {accelerator.process_index}] LR scheduler created.', flush=True)
 
-    # Resume checkpoint
-    if args.resume:
-        ckpt_paths = sorted(glob(path.join(config['log_dir'], 'ckpt-*.pt')))
-        if len(ckpt_paths) > 0:
-            ckpt_path = ckpt_paths[-1]
-            ckpt = torch.load(ckpt_path)
-            model.load_state_dict(ckpt['model'])
-            optimizer.load_state_dict(ckpt['optimizer'])
-            lr_sched.load_state_dict(ckpt['lr_sched'])
-            step = ckpt['step']
-            if is_main:
-                print(f'Checkpoint loaded from {ckpt_path}')
+    if resume_ckpt is not None:
+        try:
+            optimizer.load_state_dict(resume_ckpt['optimizer'])
+            lr_sched.load_state_dict(resume_ckpt['lr_sched'])
+            optimizer_state_loaded = True
+        except ValueError as exc:
+            optimizer_state_loaded = False
+        if is_main:
+            if optimizer_state_loaded:
+                print(f'Optimizer and scheduler checkpoint loaded at step {step}')
+            else:
+                print(f'WARNING: Optimizer/scheduler checkpoint incompatible, reinitializing them: {exc}')
 
-    # Define environments for evaluation - ONLY on main process
-    # Non-main processes don't need envs; avoids spawning conflicting workers
-    print(f'[Process {accelerator.process_index}] Before environment setup barrier', flush=True)
-    accelerator.wait_for_everyone()
-    print(f'[Process {accelerator.process_index}] After environment setup barrier', flush=True)
-    
-    eval_envs = None
-    n_test_envs = 10  # Default for non-main processes
-    
-    if is_main:
-        print(f'Initializing Meta-world ML1 benchmark...', flush=True)
-        max_test_envs = 10
-        test_envs = get_ml1_test_env_fns(config, max_envs_per_task=max_test_envs)
-        envs = test_envs
-        n_test_envs = len(test_envs)
-        print(f'Using {n_test_envs} test environments for training in-context evaluation '
-              f'(cap={max_test_envs} per task).', flush=True)
-        
-        # Use DummyVecEnv to avoid multiprocessing conflicts
-        # with Accelerate's distributed training on Windows
-        print(f'Creating DummyVecEnv with {len(envs)} environments...', flush=True)
-        eval_envs = DummyVecEnv(envs)
-        print(f'DummyVecEnv ready.', flush=True)
-        
-        # Get observation/action space from the vectorized env
-        model.set_obs_space(eval_envs.observation_space)
-        model.set_action_space(eval_envs.action_space)
-        print(f'[Process {accelerator.process_index}] Main process env setup complete', flush=True)
-    else:
-        # Non-main processes set obs/action space from config
-        # Create dummy tensors with the right shapes based on config
-        import gymnasium as gym
-        obs_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, 
-            shape=(config['dim_obs'],), dtype=np.float32
-        )
-        action_space = gym.spaces.Box(
-            low=-1.0, high=1.0, 
-            shape=(config['dim_actions'],), dtype=np.float32
-        )
-        model.set_obs_space(obs_space)
-        model.set_action_space(action_space)
-        print(f'[Process {accelerator.process_index}] Non-main process env setup complete', flush=True)
-    
-    # Synchronize all processes after environment setup
-    print(f'[Process {accelerator.process_index}] Before prepare barrier', flush=True)
-    accelerator.wait_for_everyone()
-    print(f'[Process {accelerator.process_index}] After prepare barrier', flush=True)
+    # Meta-World keeps its official ML1 test split while using the canonical
+    # fixed evaluation-environment lifecycle.
+    eval_env_fns = get_ml1_test_env_fns(
+        config,
+        max_envs_per_task=config.get('eval_num_test_envs', 4),
+    )
+    if len(eval_env_fns) == 0:
+        raise ValueError('At least one in-context evaluation environment is required')
+    envs = DummyVecEnv(eval_env_fns)
+    model.set_obs_space(envs.observation_space)
+    model.set_action_space(envs.action_space)
 
     # Prepare for distributed training
-    if is_main:
-        print(f'Preparing model and optimizer for distributed training...', flush=True)
-    
-    print(f'[Process {accelerator.process_index}] Calling accelerator.prepare()', flush=True)
-    # Prepare optimizer and dataloaders with Accelerator; avoid auto-wrapping so we can manual DDP wrap
-    optimizer, train_dataloader, lr_sched = accelerator.prepare(
-        optimizer, train_dataloader, lr_sched
+    model, optimizer, train_dataloader, lr_sched = accelerator.prepare(
+        model, optimizer, train_dataloader, lr_sched
     )
-    print(f'[Process {accelerator.process_index}] accelerator.prepare() done', flush=True)
-
-    # Move model to device and manually wrap in DDP with find_unused_parameters
-    model.to(accelerator.device)
-    if accelerator.num_processes > 1:
-        try:
-            import torch.distributed as dist
-            from torch.nn.parallel import DistributedDataParallel as DDP
-            if torch.cuda.is_available():
-                # Obtain local rank from env if set, else fall back to process index
-                local_rank = int(os.environ.get('LOCAL_RANK', str(accelerator.process_index)))
-                model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
-            else:
-                model = DDP(model, find_unused_parameters=True)
-        except Exception:
-            # If wrapping fails, continue and let Accelerate handle DDP (best effort)
-            pass
-    
-    if is_main:
-        print(f'Model prepared. Starting dataloader...', flush=True)
-    
-    # Now wrap dataloader in infinite iterator (after prepare)
-    train_dataloader = next_dataloader(train_dataloader)
-    
-    # Warm up the dataloader by fetching the first batch
-    # This ensures workers are initialized before entering the training loop
-    print(f'[Process {accelerator.process_index}] Warming up dataloader...', flush=True)
-    first_batch = next(train_dataloader)
-    print(f'[Process {accelerator.process_index}] First batch fetched', flush=True)
-    
-    # Synchronize all processes before entering training loop
-    print(f'[Process {accelerator.process_index}] Before training loop barrier', flush=True)
-    accelerator.wait_for_everyone()
-    print(f'[Process {accelerator.process_index}] After training loop barrier', flush=True)
-    
-    if is_main:
-        print(f'Dataloader ready.', flush=True)
 
     if is_main:
         start_time = datetime.now()
-        print(f'Training started at {start_time}', flush=True)
-        print(f'Entering training loop...', flush=True)
+        print(f'Training started at {start_time}')
 
     # Track compression statistics
     compression_counts = []
@@ -638,74 +552,56 @@ if __name__ == '__main__':
     save_best_model = config.get('save_best_model', True)
 
     # Training loop
-    # Use the pre-fetched first_batch for step 1 if starting from scratch
-    use_prefetched_batch = (step == 0)
-    
-    progress_interval = config.get('progress_interval', 10)
-
-    with tqdm(total=config['train_timesteps'], position=0, leave=True, disable=not is_main or args.disable_tqdm) as pbar:
+    with tqdm(total=config['train_timesteps'], position=0, leave=True, disable=not is_main) as pbar:
         pbar.update(step)
 
         while step < config['train_timesteps']:
-            # Get batch (use prefetched for first iteration if available)
-            if use_prefetched_batch:
-                batch = first_batch
-                use_prefetched_batch = False
-            else:
-                batch = next(train_dataloader)
+            next_step = step + 1
             
-            step += 1
-            
-            # Update curriculum only at stage transitions.
+            # Update curriculum (model max_compressions AND dataset length distribution)
             if use_curriculum:
-                new_stage = get_curriculum_stage(step, curriculum)
+                # Check if curriculum stage changed - update dataset length distribution
+                new_stage = get_curriculum_stage(next_step, curriculum)
                 if new_stage != current_curriculum_stage:
                     current_curriculum_stage = new_stage
-                    max_comp = get_curriculum_max_compressions(step, curriculum)
+                    max_comp = get_curriculum_max_compressions(next_step, curriculum)
                     accelerator.unwrap_model(model).set_curriculum(max_comp)
-                    new_length_dist = get_curriculum_length_distribution(step, curriculum)
+                    train_dataset.update_max_compressions(max_comp)
+                    new_length_dist = get_curriculum_length_distribution(next_step, curriculum)
                     train_dataset.update_length_distribution(new_length_dist)
                     if is_main:
-                        print(f'\n[Step {step}] Curriculum stage {new_stage}: max_comp={max_comp}, '
+                        print(f'\n[Step {next_step}] Curriculum stage {new_stage}: max_comp={max_comp}, '
                               f'length_dist={new_length_dist}')
-            
-            # Use accelerator.accumulate() for proper gradient accumulation
-            # This handles gradient syncing and scaling automatically
-            with accelerator.accumulate(model):
-                with accelerator.autocast():
-                    output = model(batch)
-                
-                # Use total loss (action + reconstruction regularization)
-                loss = output['loss_total']
-                
-                accelerator.backward(loss)
-                
-                # Only step optimizer when accumulation is complete
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
-                
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
 
-                if accelerator.sync_gradients and not accelerator.optimizer_step_was_skipped:
-                    lr_sched.step()
+            batch = next(train_dataloader)
+            step = next_step
             
-            # Track compressions and context lengths
+            with accelerator.autocast():
+                output = model(batch)
+            
+            # Use total loss (action + reconstruction regularization)
+            loss = output['loss_total']
+            
+            # Track compressions
             compression_counts.append(output['num_compressions'])
             if len(compression_counts) > 1000:
                 compression_counts.pop(0)
 
-            avg_compressions = np.mean(compression_counts) if compression_counts else 0
+            optimizer.zero_grad(set_to_none=True)
+            accelerator.backward(loss)
+            accelerator.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
 
-            if is_main and not args.disable_tqdm and step % progress_interval == 0:
-                ctx_lens = batch['context_lengths']
-                max_ctx = ctx_lens.max().item()
-                mean_ctx = ctx_lens.float().mean().item()
+            if not accelerator.optimizer_step_was_skipped:
+                lr_sched.step()
+
+            avg_compressions = np.mean(compression_counts) if compression_counts else 0
+            if is_main and (step == 1 or step % progress_interval == 0 or step == config['train_timesteps']):
                 pbar.set_postfix(
                     loss=loss.detach().float().item(),
+                    acc=output['acc_action'].detach().float().item(),
                     n_comp=output['num_compressions'],
                     avg_comp=f'{avg_compressions:.2f}',
-                    ctx_len=f'{mean_ctx:.0f}/{max_ctx}'
                 )
 
             # Logging
@@ -714,6 +610,9 @@ if __name__ == '__main__':
                 writer.add_scalar('train/loss_action', output['loss_action'].item(), step)
                 writer.add_scalar('train/loss_recon', output['loss_recon'].item(), step)
                 writer.add_scalar('train/lr', lr_sched.get_last_lr()[0], step)
+                for group, current_lr in zip(optimizer.param_groups, lr_sched.get_last_lr()):
+                    writer.add_scalar(f"train/lr_{group['group_name']}", current_lr, step)
+                writer.add_scalar('train/acc_action', output['acc_action'].item(), step)
                 writer.add_scalar('train/num_compressions', output['num_compressions'], step)
                 writer.add_scalar('train/avg_compressions', avg_compressions, step)
                 
@@ -737,16 +636,18 @@ if __name__ == '__main__':
 
                 with torch.no_grad():
                     test_loss_action = 0.0
+                    test_acc_action = 0.0
                     test_cnt = 0
 
                     for j, test_batch in enumerate(test_dataloader):
-                        with accelerator.autocast():
-                            test_output = model(test_batch)
+                        test_output = model(test_batch)
                         cnt = len(test_batch['states'])
                         test_loss_action += test_output['loss_action'].item() * cnt
+                        test_acc_action += test_output['acc_action'].item() * cnt
                         test_cnt += cnt
 
                 writer.add_scalar('test/loss_action', test_loss_action / test_cnt, step)
+                writer.add_scalar('test/acc_action', test_acc_action / test_cnt, step)
 
                 eval_end_time = datetime.now()
                 print(f'Evaluating ended at {eval_end_time}')
@@ -766,56 +667,63 @@ if __name__ == '__main__':
                 
                 with torch.no_grad():
                     unwrapped = accelerator.unwrap_model(model)
-                    eval_output = unwrapped.evaluate_in_context(
-                        vec_env=eval_envs, 
-                        eval_timesteps=config['test_source_timesteps']
-                    )
-                    
-                    test_rewards = eval_output['reward_episode']
+                    cpu_rng_state = torch.get_rng_state()
+                    cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                    train_max_compressions = unwrapped.max_compressions
+
+                    try:
+                        torch.manual_seed(0)
+                        torch.cuda.manual_seed(0)
+                        torch.cuda.manual_seed_all(0)
+                        unwrapped.set_curriculum(config.get('max_compressions', None))
+
+                        eval_output = unwrapped.evaluate_in_context(
+                            vec_env=envs,
+                            eval_timesteps=config['horizon'] * in_context_eval_episodes
+                        )
+                    finally:
+                        unwrapped.set_curriculum(train_max_compressions)
+                        torch.set_rng_state(cpu_rng_state)
+                        if cuda_rng_states is not None:
+                            torch.cuda.set_rng_state_all(cuda_rng_states)
+
+                    mean_reward = eval_output['reward_episode'].mean()
+                    mean_success = eval_output['success'].mean()
                     total_compressions = eval_output['total_compressions']
                     
-                    mean_test_reward = test_rewards.mean()
+                    # Per-environment rewards for detailed tracking
+                    env_rewards = eval_output['reward_episode'].mean(axis=1)
                     
-                    if 'success' in eval_output.keys():
-                        test_success = eval_output['success']
-                        
-                        writer.add_scalar('test/success_rate', test_success.max(axis=1).mean(), step)
-                    else:
-                        test_success = None
-                    
-                    writer.add_scalar('test_gen/mean_reward', mean_test_reward, step)
+                    writer.add_scalar('eval/mean_reward', mean_reward, step)
+                    writer.add_scalar('eval/mean_success', mean_success, step)
                     writer.add_scalar('eval/total_compressions', total_compressions, step)
+                    for env_idx, env_reward in enumerate(env_rewards):
+                        writer.add_scalar(f'eval/env_{env_idx}_reward', env_reward, step)
                     
-                    log_in_context(values=test_rewards,
-                                   max_reward=config['max_reward'],
-                                   success=test_success,
-                                   episode_length=config['horizon'],
-                                   tag='test_gen/reward_episode',
-                                   title='',
-                                   xlabel='In-context steps',
-                                   ylabel='Reward',
-                                   step=step,
-                                   writer=writer)
-                    
-                    print(f'\nIn-context eval: test_envs={n_test_envs}, test_reward={mean_test_reward:.3f}, compressions={total_compressions}')
+                    print(
+                        f'\nIn-context eval: mean_reward={mean_reward:.3f}, '
+                        f'mean_success={mean_success:.3f}, compressions={total_compressions}'
+                    )
+                    print(f'Per-env rewards: {env_rewards}')
                     
                     # Best model tracking
-                    if save_best_model and mean_test_reward > best_eval_reward:
-                        best_eval_reward = mean_test_reward
+                    if save_best_model and mean_reward > best_eval_reward:
+                        best_eval_reward = mean_reward
                         best_step = step
                         patience_counter = 0
                         
                         # Save best model
                         best_ckpt_path = path.join(config['log_dir'], 'best-model.pt')
                         torch.save({
+                            'format': CHECKPOINT_FORMAT,
                             'step': step,
                             'config': config,
-                            'model': unwrapped.state_dict(),
+                            'model': checkpoint_state_dict(unwrapped),
                             'optimizer': optimizer.state_dict(),
                             'lr_sched': lr_sched.state_dict(),
-                            'eval_reward': mean_test_reward,
+                            'eval_reward': mean_reward,
                         }, best_ckpt_path)
-                        print(f'New best model saved! reward={mean_test_reward:.3f} at step {step}')
+                        print(f'New best model saved! reward={mean_reward:.3f} at step {step}')
                     else:
                         patience_counter += 1
                         print(f'No improvement. Best: {best_eval_reward:.3f} at step {best_step} (patience: {patience_counter}/{patience})')
@@ -844,9 +752,10 @@ if __name__ == '__main__':
                 unwrapped_model = accelerator.unwrap_model(model)
                 
                 torch.save({
+                    'format': CHECKPOINT_FORMAT,
                     'step': step,
                     'config': config,
-                    'model': unwrapped_model.state_dict(),
+                    'model': checkpoint_state_dict(unwrapped_model),
                     'optimizer': optimizer.state_dict(),
                     'lr_sched': lr_sched.state_dict(),
                 }, new_ckpt_path)
@@ -855,7 +764,8 @@ if __name__ == '__main__':
     # Cleanup
     if is_main:
         writer.flush()
-        eval_envs.close()
+    
+    envs.close()
 
     if is_main:
         end_time = datetime.now()
