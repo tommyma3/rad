@@ -10,7 +10,7 @@ tf_n_head: 4
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128         # 2x embedding dim
-tf_dim_feedforward: 128 # Effective FFN width used by RAD modules
+tf_dim_feedforward: 256 # Effective FFN width used by RAD modules
 gradient_checkpointing: False
 n_transit: 30           # 40 environment timesteps = 120 transformer tokens
 
@@ -23,7 +23,7 @@ compress_n_heads: 4
 latent_update_mode: gru_gate
 
 # Gradient control: keep gradients through the most recent compression rounds.
-max_gradient_rounds: 3
+max_gradient_rounds: 5
 
 # Curriculum settings (None = unlimited)
 max_compressions: null
