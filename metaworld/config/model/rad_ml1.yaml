@@ -23,10 +23,6 @@ latent_update_mode: gru_gate
 # Gradient control
 max_gradient_rounds: 5
 
-# Reconstruction regularization
-use_recon_reg: True
-recon_reg_weight: 0.1
-
 # Curriculum settings (None = unlimited)
 max_compressions: null
 

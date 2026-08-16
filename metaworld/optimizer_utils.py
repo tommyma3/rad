@@ -3,7 +3,6 @@
 
 COMPRESSION_PARAMETER_PREFIXES = (
     'compression_transformer.',
-    'reconstruction_decoder.',
 )
 
 LATENT_PARAMETER_PREFIXES = (
@@ -28,6 +27,11 @@ def _rad_parameter_group(name):
     if name.startswith(LATENT_PARAMETER_PREFIXES):
         return 'latent'
     return 'ad'
+
+
+def freeze_reconstruction_decoder_for_finetuning(model):
+    """Keep the pretraining-only decoder out of RAD fine-tuning and DDP."""
+    model.reconstruction_decoder.requires_grad_(False)
 
 
 def build_rad_optimizer_param_groups(model, config):

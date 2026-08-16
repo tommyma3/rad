@@ -505,7 +505,6 @@ class RAD(nn.Module):
         return {
             'loss_action': loss_action,
             'loss_total': loss_action,
-            'loss_recon': torch.tensor(0.0, device=self.device),
             'acc_action': torch.zeros((), device=self.device),
             'num_compressions': compression_info['num_compressions'],
         }

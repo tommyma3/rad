@@ -102,7 +102,9 @@ class MetaWorldSARTokenTest(unittest.TestCase):
         self.assertEqual(mask.sum().item(), 8)
         self.assertEqual(targets.shape, (2, 12, 2))
         output = model(sample)
-        self.assertTrue(torch.isfinite(output['loss_total']))
+        self.assertTrue(torch.isfinite(output['loss_action']))
+        self.assertTrue(torch.equal(output['loss_total'], output['loss_action']))
+        self.assertNotIn('loss_recon', output)
 
     def test_ad_and_rad_evaluation_preserve_reward_and_success_outputs(self):
         for model in (AD(config('AD')), RAD(config('RAD'))):

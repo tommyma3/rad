@@ -42,7 +42,10 @@ from tqdm import tqdm
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 import numpy as np
-from optimizer_utils import build_rad_optimizer_param_groups
+from optimizer_utils import (
+    build_rad_optimizer_param_groups,
+    freeze_reconstruction_decoder_for_finetuning,
+)
 
 CHECKPOINT_FORMAT = 'metaworld-sar-v1'
 
@@ -402,6 +405,9 @@ if __name__ == '__main__':
             if load_result.unexpected_keys:
                 print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
 
+    # Reconstruction is a compression-pretraining objective only. The decoder
+    # remains part of checkpoints, but is not optimized during RAD fine-tuning.
+    freeze_reconstruction_decoder_for_finetuning(model)
     model = maybe_compile_model(model, config, is_main)
 
     if is_main:
@@ -579,8 +585,7 @@ if __name__ == '__main__':
             with accelerator.autocast():
                 output = model(batch)
             
-            # Use total loss (action + reconstruction regularization)
-            loss = output['loss_total']
+            loss = output['loss_action']
             
             # Track compressions
             compression_counts.append(output['num_compressions'])
@@ -608,7 +613,6 @@ if __name__ == '__main__':
             if is_main and step % config['summary_interval'] == 0:
                 writer.add_scalar('train/loss', loss.item(), step)
                 writer.add_scalar('train/loss_action', output['loss_action'].item(), step)
-                writer.add_scalar('train/loss_recon', output['loss_recon'].item(), step)
                 writer.add_scalar('train/lr', lr_sched.get_last_lr()[0], step)
                 for group, current_lr in zip(optimizer.param_groups, lr_sched.get_last_lr()):
                     writer.add_scalar(f"train/lr_{group['group_name']}", current_lr, step)

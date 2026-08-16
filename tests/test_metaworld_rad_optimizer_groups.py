@@ -8,6 +8,7 @@ SPEC = importlib.util.spec_from_file_location('metaworld_optimizer_utils', ROOT 
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 build_rad_optimizer_param_groups = MODULE.build_rad_optimizer_param_groups
+freeze_reconstruction_decoder_for_finetuning = MODULE.freeze_reconstruction_decoder_for_finetuning
 
 
 class FakeParameter:
@@ -23,7 +24,30 @@ class FakeModel:
         return iter(self._named_parameters)
 
 
+class FakeModule:
+    def __init__(self, parameters):
+        self._parameters = parameters
+
+    def requires_grad_(self, requires_grad):
+        for parameter in self._parameters:
+            parameter.requires_grad = requires_grad
+        return self
+
+
 class MetaWorldRADOptimizerGroupsTest(unittest.TestCase):
+    def test_reconstruction_decoder_is_frozen_for_finetuning(self):
+        decoder_parameter = FakeParameter()
+        model = FakeModel([
+            ('reconstruction_decoder.layers.0.weight', decoder_parameter),
+        ])
+        model.reconstruction_decoder = FakeModule([decoder_parameter])
+
+        freeze_reconstruction_decoder_for_finetuning(model)
+        groups = build_rad_optimizer_param_groups(model, {'lr': 1e-3})
+
+        self.assertFalse(decoder_parameter.requires_grad)
+        self.assertEqual(groups, [])
+
     def test_continuous_model_parameters_are_partitioned(self):
         ad = FakeParameter()
         compression = FakeParameter()
@@ -53,4 +77,3 @@ class MetaWorldRADOptimizerGroupsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
