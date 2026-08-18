@@ -8,15 +8,15 @@ tf_n_layer: 4
 tf_n_head: 8
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
-tf_n_inner: 256
-tf_dim_feedforward: 256
+tf_n_inner: 1024
+tf_dim_feedforward: 1024
 n_transit: 200           # Reduced context window for efficiency
 
 # Compression Settings
 n_compress_tokens: 60    # Multiple of 3 for state/action/reward token consistency
 always_use_latent_prefix: True
 short_memory_keep: 15    # Recent environment timesteps retained after compression
-compress_n_layers: 3
+compress_n_layers: 4
 compress_n_heads: 4
 latent_update_mode: gru_gate
 
@@ -69,12 +69,10 @@ compression_lr: 0.0001
 latent_lr: 0.0003
 train_batch_size: 128
 test_batch_size: 256
-train_source_timesteps: 8000
-test_source_timesteps: 8000
+train_source_timesteps: 2500
+test_source_timesteps: 2500
 train_timesteps: 100000
-num_warmup_steps: 1000
-
-learn_var: True
+num_warmup_steps: 2000
 
 train_n_seed: 50
 train_n_stream: 100
@@ -84,7 +82,7 @@ n_test_envs_per_task: 10
 test_n_seed: 10
 
 # Curriculum-aware LR scheduler settings
-stage_warmup_steps: 500
+stage_warmup_steps: 1000
 min_lr_ratio: 0.1
 
 # Best model tracking
@@ -92,7 +90,7 @@ save_best_model: True
 early_stopping_patience: 10
 
 progress_interval: 50
-eval_num_test_envs: 4
+eval_num_test_envs: 10
 in_context_eval_episodes: 100
 
 # Compile tensor-heavy modules while leaving recurrent compression eager.
