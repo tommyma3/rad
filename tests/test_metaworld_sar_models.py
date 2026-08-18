@@ -82,6 +82,11 @@ class FakeVecEnv:
         )
 
 
+class FakeActionSpace:
+    low = np.array([-1.0, -1.0], dtype=np.float32)
+    high = np.array([1.0, 1.0], dtype=np.float32)
+
+
 class MetaWorldSARTokenTest(unittest.TestCase):
     def test_ad_uses_three_tokens_and_continuous_action_loss(self):
         model = AD(config('AD'))
@@ -111,6 +116,13 @@ class MetaWorldSARTokenTest(unittest.TestCase):
             output = model.evaluate_in_context(FakeVecEnv(), eval_timesteps=4, sample=False)
             self.assertEqual(output['reward_episode'].shape, (2, 2))
             self.assertEqual(output['success'].shape, (2, 2))
+
+    def test_action_bounds_follow_model_device_when_set_after_device_move(self):
+        for model in (AD(config('AD')), RAD(config('RAD'))):
+            model.to('meta')
+            model.set_action_space(FakeActionSpace())
+            self.assertEqual(model.action_low.device, model.device)
+            self.assertEqual(model.action_high.device, model.device)
 
 
 if __name__ == '__main__':

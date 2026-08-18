@@ -198,8 +198,8 @@ class AD(torch.nn.Module):
         self.obs_dim = min(self.config['dim_obs'], obs_space.shape[0])
 
     def set_action_space(self, action_space):
-        low = torch.as_tensor(action_space.low, dtype=torch.float)
-        high = torch.as_tensor(action_space.high, dtype=torch.float)
+        low = torch.as_tensor(action_space.low, device=self.device, dtype=torch.float)
+        high = torch.as_tensor(action_space.high, device=self.device, dtype=torch.float)
         if hasattr(self, 'action_low'):
             self.action_low.copy_(low)
             self.action_high.copy_(high)
