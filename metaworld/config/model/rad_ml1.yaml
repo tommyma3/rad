@@ -15,7 +15,7 @@ n_transit: 200           # Reduced context window for efficiency
 # Compression Settings
 n_compress_tokens: 60    # Multiple of 3 for state/action/reward token consistency
 always_use_latent_prefix: True
-short_memory_keep: 20    # Recent environment timesteps retained after compression
+short_memory_keep: 15    # Recent environment timesteps retained after compression
 compress_n_layers: 3
 compress_n_heads: 4
 latent_update_mode: gru_gate
@@ -28,7 +28,7 @@ max_compressions: null
 
 # Dataset settings
 min_context_length: 120
-max_context_length: 2000
+max_context_length: 2500
 rad_batching_strategy: compression_buckets
 
 # Curriculum with stage-specific length distributions

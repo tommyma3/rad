@@ -12,10 +12,16 @@ tf_n_inner: 256
 tf_dim_feedforward: 256
 n_transit: 200
 
+
+# Dataset settings
+min_context_length: 120
+max_context_length: 2500
+rad_batching_strategy: compression_buckets
+
 # Compression Settings (must match rad_ml1.yaml)
 n_compress_tokens: 60
 always_use_latent_prefix: True
-short_memory_keep: 20
+short_memory_keep: 15
 
 compress_n_layers: 3
 compress_n_heads: 4
