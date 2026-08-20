@@ -10,18 +10,18 @@ tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 1024
 tf_dim_feedforward: 1024
-n_transit: 200           # Reduced context window for efficiency
+n_transit: 100           # Reduced context window for efficiency
 
 # Compression Settings
 n_compress_tokens: 60    # Multiple of 3 for state/action/reward token consistency
 always_use_latent_prefix: True
-short_memory_keep: 15    # Recent environment timesteps retained after compression
+short_memory_keep: 20    # Recent environment timesteps retained after compression
 compress_n_layers: 4
 compress_n_heads: 4
 latent_update_mode: gru_gate
 
 # Gradient control
-max_gradient_rounds: 5
+max_gradient_rounds: 6
 
 # Curriculum settings (None = unlimited)
 max_compressions: null
@@ -34,32 +34,32 @@ rad_batching_strategy: compression_buckets
 # Curriculum with stage-specific length distributions
 curriculum_schedule:
   - step: 0
-    max_compressions: 1
+    max_compressions: 2
     length_distribution:
-      short: 0.60
-      medium: 0.35
-      long: 0.05
+      short: 0.30       # Less short - need compression practice
+      medium: 0.55      # More medium - 1-2 compressions
+      long: 0.15
       very_long: 0.00
-  - step: 30000
-    max_compressions: 3
+  - step: 25000
+    max_compressions: 4
     length_distribution:
-      short: 0.35
-      medium: 0.40
-      long: 0.20
+      short: 0.20
+      medium: 0.45
+      long: 0.30
       very_long: 0.05
-  - step: 60000
+  - step: 50000
     max_compressions: 6
     length_distribution:
-      short: 0.25
-      medium: 0.30
-      long: 0.30
+      short: 0.15
+      medium: 0.35
+      long: 0.35
       very_long: 0.15
-  - step: 80000
+  - step: 75000
     max_compressions: null
     length_distribution:
-      short: 0.25
-      medium: 0.25
-      long: 0.25
+      short: 0.15
+      medium: 0.30
+      long: 0.30
       very_long: 0.25
 
 # Training

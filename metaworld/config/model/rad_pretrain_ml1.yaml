@@ -10,7 +10,7 @@ tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 1024
 tf_dim_feedforward: 1024
-n_transit: 200
+n_transit: 100
 
 
 # Dataset settings
@@ -21,7 +21,7 @@ rad_batching_strategy: compression_buckets
 # Compression Settings (must match rad_ml1.yaml)
 n_compress_tokens: 60
 always_use_latent_prefix: True
-short_memory_keep: 15
+short_memory_keep: 20
 
 compress_n_layers: 4
 compress_n_heads: 4
@@ -36,8 +36,6 @@ pretrain_warmup_steps: 3000
 train_source_timesteps: 2500
 train_n_seed: 50
 train_n_stream: 100
-
-learn_var: True
 
 torch_compile: True
 torch_compile_modules:
