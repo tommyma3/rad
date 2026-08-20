@@ -8,6 +8,7 @@ import argparse
 import atexit
 import tempfile
 import pickle
+import json
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 
@@ -212,6 +213,197 @@ def save_collection_config(output_dir, file_name, config, description):
     print(f'  - Config saved to: {config_path}')
 
 
+def _json_scalar(value):
+    """Convert numpy scalar values to JSON-friendly Python scalars."""
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _safe_float(value):
+    value = float(value)
+    if np.isnan(value) or np.isinf(value):
+        return None
+    return value
+
+
+def _safe_mean(values):
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return None
+    return _safe_float(values.mean())
+
+
+def _task_metadata(task_instance, env_cls=None):
+    metadata = {
+        'env_name': getattr(task_instance, 'env_name', None),
+    }
+    if env_cls is not None:
+        metadata['env_class'] = getattr(env_cls, '__name__', str(env_cls))
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
+def _episode_metrics(rewards, dones, success):
+    episode_success = []
+    episode_returns = []
+    episode_lengths = []
+    final_quarter_success = []
+    final_quarter_returns = []
+
+    n_steps, n_envs = rewards.shape
+    final_quarter_start = int(0.75 * n_steps)
+    running_success = np.zeros(n_envs, dtype=np.bool_)
+    running_returns = np.zeros(n_envs, dtype=np.float64)
+    running_lengths = np.zeros(n_envs, dtype=np.int64)
+
+    for step in range(n_steps):
+        running_success |= success[step].astype(np.bool_)
+        running_returns += rewards[step]
+        running_lengths += 1
+
+        done_envs = np.flatnonzero(dones[step].astype(np.bool_))
+        for env_id in done_envs:
+            succeeded = bool(running_success[env_id])
+            ep_return = float(running_returns[env_id])
+            episode_success.append(succeeded)
+            episode_returns.append(ep_return)
+            episode_lengths.append(int(running_lengths[env_id]))
+            if step >= final_quarter_start:
+                final_quarter_success.append(succeeded)
+                final_quarter_returns.append(ep_return)
+
+            running_success[env_id] = False
+            running_returns[env_id] = 0.0
+            running_lengths[env_id] = 0
+
+    return {
+        'episode_count': len(episode_success),
+        'episode_success_rate': _safe_mean(episode_success),
+        'episode_return_mean': _safe_mean(episode_returns),
+        'episode_length_mean': _safe_mean(episode_lengths),
+        'final_quarter_episode_count': len(final_quarter_success),
+        'final_quarter_episode_success_rate': _safe_mean(final_quarter_success),
+        'final_quarter_episode_return_mean': _safe_mean(final_quarter_returns),
+    }
+
+
+def _chunk_metrics(rewards, success, n_chunks=4):
+    n_steps = rewards.shape[0]
+    chunks = []
+    for chunk_idx, step_indices in enumerate(np.array_split(np.arange(n_steps), n_chunks)):
+        if step_indices.size == 0:
+            continue
+        chunk_rewards = rewards[step_indices]
+        chunk_success = success[step_indices]
+        chunks.append({
+            'chunk': chunk_idx,
+            'start_step': int(step_indices[0]),
+            'end_step_exclusive': int(step_indices[-1] + 1),
+            'step_success_rate': _safe_float(chunk_success.mean()),
+            'reward_mean': _safe_float(chunk_rewards.mean()),
+        })
+    return chunks
+
+
+def summarize_history_metrics(history_data, idx, task_instance=None, env_cls=None):
+    rewards = np.asarray(history_data['rewards'], dtype=np.float32)
+    success = np.asarray(history_data['success'], dtype=np.float32)
+    dones = np.asarray(history_data['dones'], dtype=np.bool_)
+
+    metrics = {
+        'task_index': int(idx),
+        'steps_per_stream': int(rewards.shape[0]),
+        'n_streams': int(rewards.shape[1]) if rewards.ndim == 2 else 1,
+        'total_env_steps': int(rewards.size),
+        'step_success_rate': _safe_float(success.mean()),
+        'reward_mean': _safe_float(rewards.mean()),
+        'reward_std': _safe_float(rewards.std()),
+        'reward_min': _safe_float(rewards.min()),
+        'reward_max': _safe_float(rewards.max()),
+        'task': _task_metadata(task_instance, env_cls),
+        'chunks': _chunk_metrics(rewards, success),
+    }
+    metrics.update(_episode_metrics(rewards, dones, success))
+    return metrics
+
+
+def aggregate_collection_metrics(task_metrics, description, config):
+    if not task_metrics:
+        return {
+            'description': description,
+            'task_count': 0,
+            'saved_at': datetime.now().isoformat(timespec='seconds'),
+        }
+
+    def weighted_average(key, weight_key):
+        numerator = 0.0
+        denominator = 0.0
+        for item in task_metrics:
+            value = item.get(key)
+            weight = item.get(weight_key, 0)
+            if value is None or weight <= 0:
+                continue
+            numerator += float(value) * float(weight)
+            denominator += float(weight)
+        return _safe_float(numerator / denominator) if denominator > 0 else None
+
+    task_success_rates = [
+        item['episode_success_rate']
+        for item in task_metrics
+        if item.get('episode_success_rate') is not None
+    ]
+    final_success_rates = [
+        item['final_quarter_episode_success_rate']
+        for item in task_metrics
+        if item.get('final_quarter_episode_success_rate') is not None
+    ]
+
+    return {
+        'description': description,
+        'saved_at': datetime.now().isoformat(timespec='seconds'),
+        'task': config.get('task'),
+        'alg': config.get('alg'),
+        'alg_seed': config.get('alg_seed'),
+        'n_stream': config.get('n_stream'),
+        'total_source_timesteps': config.get('total_source_timesteps'),
+        'task_count': len(task_metrics),
+        'total_env_steps': int(sum(item['total_env_steps'] for item in task_metrics)),
+        'mean_task_episode_success_rate': _safe_mean(task_success_rates),
+        'min_task_episode_success_rate': _safe_float(np.min(task_success_rates)) if task_success_rates else None,
+        'max_task_episode_success_rate': _safe_float(np.max(task_success_rates)) if task_success_rates else None,
+        'mean_task_final_quarter_episode_success_rate': _safe_mean(final_success_rates),
+        'step_success_rate': weighted_average('step_success_rate', 'total_env_steps'),
+        'episode_success_rate': weighted_average('episode_success_rate', 'episode_count'),
+        'final_quarter_episode_success_rate': weighted_average(
+            'final_quarter_episode_success_rate',
+            'final_quarter_episode_count',
+        ),
+        'reward_mean': weighted_average('reward_mean', 'total_env_steps'),
+        'tasks': sorted(task_metrics, key=lambda item: item['task_index']),
+    }
+
+
+def save_collection_metrics(output_dir, file_name, metrics):
+    metrics_path = os.path.join(output_dir, f'{file_name}_metrics.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f, indent=2)
+    print(f'  - Metrics saved to: {metrics_path}')
+    return metrics_path
+
+
+def attach_metrics_attrs(env_group, metrics):
+    for key, value in metrics.items():
+        if key in ('task', 'chunks'):
+            continue
+        value = _json_scalar(value)
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            env_group.attrs[key] = value
+    for key, value in metrics.get('task', {}).items():
+        env_group.attrs[f'task_{key}'] = value
+
+
 class OptimizedHistoryCallback(BaseCallback):
     """Optimized callback that preallocates arrays and minimizes overhead.
     
@@ -360,6 +552,20 @@ def collect_histories(task_instances, path, file_name, config, description=""):
     
     if start_idx > 0:
         print(f'  - Resuming from task {start_idx}')
+
+    collected_metrics = []
+    with h5py.File(hdf5_path, 'a') as hf:
+        for key in sorted(hf.keys(), key=lambda item: int(item)):
+            idx = int(key)
+            env_cls, task_instance = task_instances[idx]
+            history_data = {
+                'rewards': hf[key]['rewards'][()],
+                'dones': hf[key]['dones'][()],
+                'success': hf[key]['success'][()],
+            }
+            metrics = summarize_history_metrics(history_data, idx, task_instance, env_cls)
+            attach_metrics_attrs(hf[key], metrics)
+            collected_metrics.append(metrics)
     
     # Create temp directory for worker results
     temp_dir = tempfile.mkdtemp(prefix='collect_histories_')
@@ -367,61 +573,70 @@ def collect_histories(task_instances, path, file_name, config, description=""):
     try:
         # Use ProcessPoolExecutor for better management and as_completed for non-blocking
         n_workers = min(config['n_process'], len(task_instances) - start_idx)
-        
-        with ProcessPoolExecutor(max_workers=n_workers, initializer=init_worker) as executor:
-            _active_executor = executor
-            
-            # Submit all remaining tasks
-            futures = {}
-            for i in range(start_idx, len(task_instances)):
-                if _shutdown_requested:
-                    break
-                    
-                env_cls, task_instance = task_instances[i]
-                future = executor.submit(
-                    worker, config, env_cls, task_instance, 
-                    path, i, file_name, temp_dir
-                )
-                futures[future] = i
-            
-            # Process results as they complete (no waiting for slower workers)
-            completed = 0
-            total = len(futures)
-            
-            for future in as_completed(futures):
-                if _shutdown_requested:
-                    break
-                    
-                env_idx = futures[future]
-                try:
-                    idx, temp_file, success = future.result()
-                    
-                    if success and temp_file and os.path.exists(temp_file):
-                        # Load from temp file and save to HDF5
-                        with open(temp_file, 'rb') as f:
-                            history_data = pickle.load(f)
-                        
-                        with h5py.File(hdf5_path, 'a') as hf:
-                            if f'{idx}' not in hf.keys():
-                                env_group = hf.create_group(f'{idx}')
-                                for key, value in history_data.items():
-                                    env_group.create_dataset(key, data=value, compression='gzip', compression_opts=1)
-                        
-                        # Clean up temp file
-                        os.remove(temp_file)
-                        
-                        completed += 1
-                        elapsed = datetime.now() - start_time
-                        rate = elapsed / completed if completed > 0 else elapsed
-                        eta = rate * (total - completed)
-                        print(f'  Progress: {completed}/{total} tasks completed. ETA: {eta}')
-                    else:
-                        print(f'  [!] Task {idx} failed')
-                        
-                except Exception as e:
-                    print(f'  [!] Error processing task {env_idx}: {e}')
-            
-            _active_executor = None
+
+        if n_workers <= 0:
+            print('  - All tasks already collected; regenerating metrics only.')
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers, initializer=init_worker) as executor:
+                _active_executor = executor
+
+                # Submit all remaining tasks
+                futures = {}
+                for i in range(start_idx, len(task_instances)):
+                    if _shutdown_requested:
+                        break
+
+                    env_cls, task_instance = task_instances[i]
+                    future = executor.submit(
+                        worker, config, env_cls, task_instance,
+                        path, i, file_name, temp_dir
+                    )
+                    futures[future] = i
+
+                # Process results as they complete (no waiting for slower workers)
+                completed = 0
+                total = len(futures)
+
+                for future in as_completed(futures):
+                    if _shutdown_requested:
+                        break
+
+                    env_idx = futures[future]
+                    try:
+                        idx, temp_file, success = future.result()
+
+                        if success and temp_file and os.path.exists(temp_file):
+                            # Load from temp file and save to HDF5
+                            with open(temp_file, 'rb') as f:
+                                history_data = pickle.load(f)
+
+                            with h5py.File(hdf5_path, 'a') as hf:
+                                if f'{idx}' not in hf.keys():
+                                    env_group = hf.create_group(f'{idx}')
+                                    for key, value in history_data.items():
+                                        env_group.create_dataset(key, data=value, compression='gzip', compression_opts=1)
+                                    env_cls, task_instance = task_instances[idx]
+                                    metrics = summarize_history_metrics(
+                                        history_data, idx, task_instance, env_cls
+                                    )
+                                    attach_metrics_attrs(env_group, metrics)
+                                    collected_metrics.append(metrics)
+
+                            # Clean up temp file
+                            os.remove(temp_file)
+
+                            completed += 1
+                            elapsed = datetime.now() - start_time
+                            rate = elapsed / completed if completed > 0 else elapsed
+                            eta = rate * (total - completed)
+                            print(f'  Progress: {completed}/{total} tasks completed. ETA: {eta}')
+                        else:
+                            print(f'  [!] Task {idx} failed')
+
+                    except Exception as e:
+                        print(f'  [!] Error processing task {env_idx}: {e}')
+
+                _active_executor = None
                 
     except KeyboardInterrupt:
         print("\n[!] Interrupt received, cleaning up...")
@@ -439,6 +654,17 @@ def collect_histories(task_instances, path, file_name, config, description=""):
     print()
     print(f'Collecting {description} histories ended at {end_time}')
     print(f'Elapsed time: {end_time - start_time}')
+
+    metrics = aggregate_collection_metrics(collected_metrics, description, config)
+    save_collection_metrics(path, file_name, metrics)
+    print(
+        f'  - {description} mean task episode success: '
+        f'{metrics.get("mean_task_episode_success_rate")}'
+    )
+    print(
+        f'  - {description} final-quarter episode success: '
+        f'{metrics.get("final_quarter_episode_success_rate")}'
+    )
 
 
 if __name__ == '__main__':
@@ -491,4 +717,3 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"\n[!] Program error: {e}")
         sys.exit(1)
-    
