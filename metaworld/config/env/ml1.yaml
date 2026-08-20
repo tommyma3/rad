@@ -1,5 +1,5 @@
 env: metaworld
-task: reach-v3
+task: window-close-v3
 
 mw_seed: 0
 horizon: 100
