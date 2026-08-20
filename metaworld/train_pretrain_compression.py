@@ -43,6 +43,23 @@ from tqdm import tqdm
 
 CHECKPOINT_FORMAT = 'metaworld-sar-v1'
 
+
+def apply_overrides(config, override):
+    for option in override.split('|'):
+        if not option:
+            continue
+        address, value = option.split('=', 1)
+        keys = address.split('.')
+        here = config
+        for key in keys[:-1]:
+            if key not in here:
+                here[key] = {}
+            here = here[key]
+        if keys[-1] not in here:
+            print(f'Warning: {address} is not defined in config file.')
+        here[keys[-1]] = yaml.load(value, Loader=yaml.FullLoader)
+
+
 def pretrain_collate_fn(batch):
     """Collate function for pre-training dataset (no query states/targets)."""
     import numpy as np
@@ -76,11 +93,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='rad_pretrain_ml1',
                        help='Model config name (without .yaml extension)')
+    parser.add_argument('--override', '-o', default='',
+                       help='Override config entries, e.g. "task=push-v3|train_source_timesteps=10000"')
     args = parser.parse_args()
     
     config = get_config('./config/env/ml1.yaml')
     config.update(get_config('./config/algorithm/ppo_ml1.yaml'))
     config.update(get_config(f'./config/model/{args.config}.yaml'))
+    apply_overrides(config, args.override)
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
@@ -288,4 +308,3 @@ if __name__ == '__main__':
         end_time = datetime.now()
         print(f'\nPre-training ended at {end_time}')
         print(f'Elapsed time: {end_time - start_time}')
-
