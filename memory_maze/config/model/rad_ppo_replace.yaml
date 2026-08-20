@@ -1,0 +1,3 @@
+include: config/model/rad_ppo.yaml
+latent_update_mode: replace
+run_dir: runs/RAD-memory-maze-ppo-replace

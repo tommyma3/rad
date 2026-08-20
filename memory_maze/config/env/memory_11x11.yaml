@@ -1,0 +1,10 @@
+env: memory_maze
+maze_size: 11
+episode_steps: 2000
+num_objects: 4
+camera_resolution: 64
+control_freq: 4.0
+num_actions: 6
+n_train_tasks: 1000
+n_test_tasks: 100
+task_split_seed: 0

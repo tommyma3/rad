@@ -1,0 +1,6 @@
+include: config/model/rad_ppo.yaml
+pretrain_lr: 0.0003
+pretrain_batch_size: 8
+pretrain_timesteps: 50000
+pretrain_warmup_steps: 2000
+pretrain_run_dir: runs/RAD-pretrain-memory-maze-ppo

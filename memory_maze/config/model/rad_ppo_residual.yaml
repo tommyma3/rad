@@ -1,0 +1,3 @@
+include: config/model/rad_ppo.yaml
+latent_update_mode: residual
+run_dir: runs/RAD-memory-maze-ppo-residual

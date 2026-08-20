@@ -1,0 +1,37 @@
+source_algorithm: dreamer_tbtt
+source_seed: 0
+device: cuda
+num_actions: 6
+
+# Memory Maze paper Table E.1.
+parallel_envs: 8
+rssm_deter: 2048
+rssm_stoch: 32
+rssm_classes: 32
+rssm_hidden: 1000
+encoder_dim: 1024
+cnn_depth: 32
+replay_capacity: 10000000
+batch_size: 32
+sequence_length: 48
+imagination_horizon: 15
+environment_steps_per_update: 25
+slow_critic_interval: 100
+discount: 0.995
+lambda: 0.95
+actor_entropy: 0.001
+kl_scale: 1.0
+kl_balance: 0.8
+world_model_lr: 0.0003
+actor_lr: 0.0001
+critic_lr: 0.0001
+adam_epsilon: 0.00001
+weight_decay: 0.01
+grad_clip: 200
+prefill_steps: 5000
+
+max_source_timesteps: 100000000
+convergence_min_steps: 1000000
+convergence_window: 20
+convergence_patience: 5
+convergence_tolerance: 0.01

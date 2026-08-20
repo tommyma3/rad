@@ -1,0 +1,3 @@
+include: config/model/ad_base.yaml
+source_algorithm: dreamer_tbtt
+run_dir: runs/AD-memory-maze-dreamer-tbtt

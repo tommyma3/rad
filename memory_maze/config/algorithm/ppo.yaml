@@ -1,0 +1,23 @@
+source_algorithm: ppo
+source_seed: 0
+device: auto
+
+# Feed-forward convolutional PPO. No recurrence or frame stacking.
+source_lr: 0.00025
+n_steps: 1024
+batch_size: 256
+n_epochs: 4
+gamma: 0.995
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.001
+vf_coef: 0.5
+max_grad_norm: 0.5
+
+# Train until plateau, subject to this safety cap.
+max_source_timesteps: 100000000
+convergence_min_steps: 1000000
+convergence_window: 20
+convergence_patience: 5
+convergence_tolerance: 0.01
+progress_bar: true
