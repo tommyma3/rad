@@ -15,7 +15,7 @@ n_transit: 100
 
 # Dataset settings
 min_context_length: 120
-max_context_length: 2500
+max_context_length: 10000
 rad_batching_strategy: compression_buckets
 
 # Compression Settings (must match rad_ml1.yaml)
@@ -33,7 +33,7 @@ pretrain_lr: 0.0003
 pretrain_warmup_steps: 3000
 
 # Dataset
-train_source_timesteps: 2500
+train_source_timesteps: 10000
 train_n_seed: 50
 train_n_stream: 100
 
