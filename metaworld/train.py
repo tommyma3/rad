@@ -48,17 +48,36 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 CHECKPOINT_FORMAT = 'metaworld-sar-v1'
 
+
+def apply_overrides(config, override):
+    for option in override.split('|'):
+        if not option:
+            continue
+        address, value = option.split('=', 1)
+        keys = address.split('.')
+        here = config
+        for key in keys[:-1]:
+            if key not in here:
+                here[key] = {}
+            here = here[key]
+        if keys[-1] not in here:
+            print(f'Warning: {address} is not defined in config file.')
+        here[keys[-1]] = yaml.load(value, Loader=yaml.FullLoader)
+
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='ad_ml1',
                        help='Model config name (without .yaml extension)')
+    parser.add_argument('--override', '-o', default='',
+                       help='Override config entries, e.g. "task=push-v3|train_source_timesteps=10000"')
     args = parser.parse_args()
     
     config = get_config('./config/env/ml1.yaml')
     config.update(get_config('./config/algorithm/ppo_ml1.yaml'))
     config.update(get_config(f'./config/model/{args.config}.yaml'))
+    apply_overrides(config, args.override)
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
