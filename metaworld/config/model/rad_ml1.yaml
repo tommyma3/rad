@@ -28,7 +28,7 @@ max_compressions: null
 
 # Dataset settings
 min_context_length: 120
-max_context_length: 10000
+max_context_length: 2500
 rad_batching_strategy: compression_buckets
 
 # Curriculum with stage-specific length distributions
@@ -69,8 +69,8 @@ compression_lr: 0.0001
 latent_lr: 0.0003
 train_batch_size: 128
 test_batch_size: 256
-train_source_timesteps: 10000
-test_source_timesteps: 10000
+train_source_timesteps: 2500
+test_source_timesteps: 2500
 train_timesteps: 100000
 num_warmup_steps: 2000
 
