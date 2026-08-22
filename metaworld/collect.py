@@ -357,6 +357,7 @@ def aggregate_collection_metrics(task_metrics, description, config):
         for item in task_metrics
         if item.get('final_quarter_episode_success_rate') is not None
     ]
+    mean_task_final_success_rate = _safe_mean(final_success_rates)
 
     return {
         'description': description,
@@ -371,7 +372,8 @@ def aggregate_collection_metrics(task_metrics, description, config):
         'mean_task_episode_success_rate': _safe_mean(task_success_rates),
         'min_task_episode_success_rate': _safe_float(np.min(task_success_rates)) if task_success_rates else None,
         'max_task_episode_success_rate': _safe_float(np.max(task_success_rates)) if task_success_rates else None,
-        'mean_task_final_quarter_episode_success_rate': _safe_mean(final_success_rates),
+        'mean_task_final_quarter_episode_success_rate': mean_task_final_success_rate,
+        'final_task_success_rate': mean_task_final_success_rate,
         'step_success_rate': weighted_average('step_success_rate', 'total_env_steps'),
         'episode_success_rate': weighted_average('episode_success_rate', 'episode_count'),
         'final_quarter_episode_success_rate': weighted_average(
@@ -665,6 +667,11 @@ def collect_histories(task_instances, path, file_name, config, description=""):
         f'  - {description} final-quarter episode success: '
         f'{metrics.get("final_quarter_episode_success_rate")}'
     )
+    if description == "train task":
+        print(
+            '  - train task final success rate: '
+            f'{metrics.get("final_task_success_rate")}'
+        )
 
 
 if __name__ == '__main__':
