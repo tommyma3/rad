@@ -21,7 +21,7 @@ compress_n_heads: 4
 latent_update_mode: gru_gate
 
 # Gradient control
-max_gradient_rounds: 6
+max_gradient_rounds: 9999999
 
 # Curriculum settings (None = unlimited)
 max_compressions: null
@@ -90,7 +90,7 @@ save_best_model: True
 early_stopping_patience: 10
 
 progress_interval: 50
-eval_num_test_envs: 10
+eval_num_test_envs: 50
 in_context_eval_episodes: 100
 
 # Compile tensor-heavy modules while leaving recurrent compression eager.
