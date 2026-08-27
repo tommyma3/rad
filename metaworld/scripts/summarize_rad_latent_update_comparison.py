@@ -51,6 +51,7 @@ def load_checkpoint_metadata(path):
     return {
         'best_step': checkpoint.get('step'),
         'best_eval_reward': checkpoint.get('eval_reward'),
+        'best_final_success_rate': checkpoint.get('final_success_rate'),
     }
 
 
@@ -113,6 +114,7 @@ def main():
         'exists',
         'best_step',
         'best_eval_reward',
+        'best_final_success_rate',
         'eval_mean_reward',
         'eval_std_reward',
         'eval_mean_success',
