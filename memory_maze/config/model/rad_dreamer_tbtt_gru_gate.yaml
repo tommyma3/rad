@@ -1,3 +1,0 @@
-include: config/model/rad_dreamer_tbtt.yaml
-latent_update_mode: gru_gate
-run_dir: runs/RAD-memory-maze-dreamer-tbtt-gru-gate

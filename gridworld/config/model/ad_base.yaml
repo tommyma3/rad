@@ -1,5 +1,6 @@
 dynamics: False
 dynamics_strength: 1.0
+gradient_checkpointing: False
 
 # training
 label_smoothing: 0.0
@@ -10,9 +11,9 @@ beta2: 0.99
 weight_decay: 0.01
 
 # eval & logging
-summary_interval: 100
-eval_interval: 1000
+summary_interval: 1000
+eval_interval: 10000
 gen_interval: 10000
-ckpt_interval: 1000
+ckpt_interval: 10000
 
 train_n_stream: 100

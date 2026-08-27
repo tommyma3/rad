@@ -1,3 +1,0 @@
-include: config/model/rad_ppo.yaml
-latent_update_mode: multiplicative_gate
-run_dir: runs/RAD-memory-maze-ppo-multiplicative-gate

@@ -34,15 +34,34 @@ def worker(arg, config, traj_dir, env_idx, history, file_name):
         pass
     
     n_stack = config.get('n_stack', 1)
+    optimistic_exploration = config.get('optimistic_exploration', False)
+    visit_counts = {} if optimistic_exploration else None
     
     if config['env'] == 'darkroom':
-        env = DummyVecEnv([make_env(config, goal=arg)] * config['n_stream'])
-    elif config['env'] == 'dark_key_to_door':
+        env = DummyVecEnv([
+            make_env(
+                config,
+                goal=arg,
+                optimistic_exploration=optimistic_exploration,
+                visit_counts=visit_counts,
+            )
+            for _ in range(config['n_stream'])
+        ])
+    elif config['env'] == 'dktd':
         # arg is (key_x, key_y, goal_x, goal_y)
         key = arg[:2]
         goal = arg[2:]
-        env = DummyVecEnv([make_env(config, key=key, goal=goal)] * config['n_stream'])
-        # Apply VecFrameStack for dark_key_to_door environment
+        env = DummyVecEnv([
+            make_env(
+                config,
+                key=key,
+                goal=goal,
+                optimistic_exploration=optimistic_exploration,
+                visit_counts=visit_counts,
+            )
+            for _ in range(config['n_stream'])
+        ])
+        # Apply VecFrameStack for dktd environment
         if n_stack > 1:
             env = VecFrameStack(env, n_stack=n_stack)
     else:
@@ -50,10 +69,6 @@ def worker(arg, config, traj_dir, env_idx, history, file_name):
     
     alg_name = config['alg']
     seed = config['alg_seed'] + env_idx
-
-    config['device'] = 'cpu'
-    # Disable tensorboard logging
-    config['tensorboard_log'] = None
 
     alg = ALGORITHM[alg_name](config, env, seed)
     callback = HistoryLoggerCallback(config['env'], env_idx, history, n_stack=n_stack)
@@ -80,25 +95,31 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='darkroom',
-                       help='Environment name: darkroom or dark_key_to_door')
+                       help='Environment name: darkroom or dktd')
     parser.add_argument('--n-stack', type=int, default=8,
-                       help='Number of frames to stack (only for dark_key_to_door)')
+                       help='Number of frames to stack (only for dktd)')
+    parser.add_argument('--alg', type=str, default=None,
+                       help='Algorithm config name without .yaml extension')
+    parser.add_argument('--max-envs', type=int, default=None,
+                       help='Optional cap on number of tasks to collect')
     args = parser.parse_args()
     
     # Determine config files based on environment
     env_config_map = {
         'darkroom': ('darkroom', 'ppo_darkroom'),
-        'dark_key_to_door': ('dark_key_to_door', 'ppo_dark_key_to_door'),
+        'dktd': ('dktd', 'ppo_dktd'),
     }
     if args.env not in env_config_map:
         raise ValueError(f'Unknown environment: {args.env}')
     env_cfg, alg_cfg = env_config_map[args.env]
+    if args.alg is not None:
+        alg_cfg = args.alg
     
     config = get_config(f"config/env/{env_cfg}.yaml")
     config.update(get_config(f"config/algorithm/{alg_cfg}.yaml"))
     
-    # Add n_stack to config for dark_key_to_door
-    if args.env == 'dark_key_to_door':
+    # Add n_stack to config for dktd
+    if args.env == 'dktd':
         config['n_stack'] = args.n_stack
 
     if not os.path.exists("datasets"):
@@ -109,6 +130,9 @@ if __name__ == '__main__':
     # Shuffle tasks for a diverse train/test split
     train_args, test_args = SAMPLE_ENVIRONMENT[config['env']](config, shuffle=True)
     total_args = train_args + test_args
+    max_envs = args.max_envs if args.max_envs is not None else config.get('max_collect_envs')
+    if max_envs is not None:
+        total_args = total_args[:max_envs]
     n_envs = len(total_args)
 
     file_name = get_traj_file_name(config)

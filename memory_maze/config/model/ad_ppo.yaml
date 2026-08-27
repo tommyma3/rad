@@ -1,3 +1,0 @@
-include: config/model/ad_base.yaml
-source_algorithm: ppo
-run_dir: runs/AD-memory-maze-ppo

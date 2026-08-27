@@ -1,66 +1,65 @@
 """
-Recurrent Algorithm Distillation (RAD) Model.
+Recurrent reward-aware SAD-style Algorithm Distillation.
 
-This model extends the original AD with a recurrence/compression mechanism:
-1. When sequence length exceeds max_seq_length, compress older history into latent tokens
-2. Continue AD with [latent_tokens, recent_transitions, query_state]
-3. Repeat compression as needed for very long sequences
-
-Uses GPT-2 style Pre-LayerNorm transformer architecture.
+RAD uses the same s_t, a_t, r_t tokenization as gridworld_test AD and adds a
+compression transformer for long histories. Config fields such as n_transit and
+short_memory_keep are environment-timestep counts; internally they are converted
+to token counts by multiplying by three.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import pack, rearrange, repeat
+from einops import rearrange
 
-from env import map_dark_states, map_dark_states_inverse
+from env import map_dark_states
 from .compression import CompressionTransformer, ReconstructionDecoder
 from .gpt2 import GPT2Transformer
 
 
 class RAD(nn.Module):
-    """
-    Recurrent Algorithm Distillation (RAD) with GPT-2 style decoder-only transformer.
+    """RAD over interleaved state/action/reward tokens."""
 
-    Uses Pre-LayerNorm architecture as in the original GPT-2 paper,
-    with an additional compression transformer for handling long sequences.
-    """
+    LATENT_UPDATE_MODES = ('replace', 'residual', 'multiplicative_gate', 'gru_gate')
+
     def __init__(self, config):
         super(RAD, self).__init__()
 
         self.config = config
         self.device = config['device']
-        self.n_transit = config['n_transit']  # Max sequence length for AD transformer
-        self.max_seq_length = config['n_transit']
+        self.n_transit = config['n_transit']
+        self.max_seq_length = 3 * self.n_transit
         self.mixed_precision = config['mixed_precision']
         self.grid_size = config['grid_size']
+        self.num_actions = config['num_actions']
 
-        # Compression config
-        self.n_compress_tokens = config.get('n_compress_tokens', 40)
-        short_capacity = max(0, self.max_seq_length - self.n_compress_tokens - 1)
-        self.short_memory_keep = min(config.get('short_memory_keep', self.n_compress_tokens), short_capacity)
+        self.n_compress_tokens = config.get('n_compress_tokens', 15)
+        if self.n_compress_tokens % 3 != 0:
+            raise ValueError('n_compress_tokens must be a multiple of 3 for s/a/r token consistency')
+
+        default_keep = max(1, self.n_compress_tokens // 3)
+        self.short_memory_keep = config.get('short_memory_keep', default_keep)
+        self.short_memory_keep_tokens = 3 * self.short_memory_keep
         self.compress_n_layers = config.get('compress_n_layers', 2)
         self.compress_n_heads = config.get('compress_n_heads', 4)
         self.max_gradient_rounds = config.get('max_gradient_rounds', 2)
-        self.use_recon_reg = config.get('use_recon_reg', True)
-        self.recon_reg_weight = config.get('recon_reg_weight', 0.1)
-        
-        # Reward-weighted reconstruction config
-        self.use_reward_weighted_recon = config.get('use_reward_weighted_recon', True)
-        self.reward_weight_multiplier = config.get('reward_weight_multiplier', 5.0)  # Weight for positive reward transitions
-        
-        # Curriculum settings
-        self.max_compressions = config.get('max_compressions', None)  # None = unlimited
-        
+        self.max_compressions = config.get('max_compressions', None)
+        self.max_context_tokens = 3 * config.get('max_context_length', self.n_transit)
+        self.always_use_latent_prefix = config.get('always_use_latent_prefix', False)
+        self.latent_update_mode = config.get('latent_update_mode', 'replace')
+        if self.latent_update_mode not in self.LATENT_UPDATE_MODES:
+            raise ValueError(
+                f'Unknown latent_update_mode: {self.latent_update_mode}. '
+                f'Expected one of {self.LATENT_UPDATE_MODES}'
+            )
+
         tf_n_embd = config['tf_n_embd']
         tf_n_head = config.get('tf_n_head', 4)
         tf_n_layer = config.get('tf_n_layer', 4)
         tf_dim_feedforward = config.get('tf_dim_feedforward', tf_n_embd * 4)
         tf_dropout = config.get('tf_dropout', 0.1)
 
-        # GPT-2 style AD Transformer (Pre-LayerNorm, causal)
         self.ad_transformer = GPT2Transformer(
             d_model=tf_n_embd,
             n_heads=tf_n_head,
@@ -69,24 +68,30 @@ class RAD(nn.Module):
             dim_feedforward=tf_dim_feedforward,
             dropout=tf_dropout,
         )
+        if config.get('gradient_checkpointing', False):
+            self.ad_transformer.enable_gradient_checkpointing()
 
-        # Embeddings (shared)
-        self.embed_context = nn.Linear(config['dim_states'] * 2 + config['num_actions'] + 1, tf_n_embd)
-        self.embed_query_state = nn.Embedding(config['grid_size'] * config['grid_size'], tf_n_embd)
-        
-        # Action prediction head
-        self.pred_action = nn.Linear(tf_n_embd, config['num_actions'])
+        self.embed_state = nn.Embedding(config['grid_size'] * config['grid_size'], tf_n_embd)
+        self.embed_action = nn.Linear(self.num_actions, tf_n_embd)
+        self.embed_reward = nn.Linear(1, tf_n_embd)
+        self.type_embedding = nn.Parameter(torch.zeros(1, 1, 3, tf_n_embd))
+        self.latent_type_embedding = nn.Parameter(torch.zeros(1, 1, tf_n_embd))
+        self.null_latent_tokens = nn.Parameter(torch.zeros(1, self.n_compress_tokens, tf_n_embd))
 
-        # Compression Transformer
+        self.pred_action = nn.Linear(tf_n_embd, self.num_actions)
+        self.latent_residual_norm = nn.LayerNorm(tf_n_embd)
+        self.latent_multiplicative_gate = nn.Linear(tf_n_embd, tf_n_embd)
+        self.latent_gru_gate = nn.Linear(2 * tf_n_embd, tf_n_embd)
+        self.latent_gru_candidate = nn.Linear(2 * tf_n_embd, tf_n_embd)
+
         self.compression_transformer = CompressionTransformer(
             d_model=tf_n_embd,
             n_heads=self.compress_n_heads,
             n_layers=self.compress_n_layers,
             n_compress_tokens=self.n_compress_tokens,
             dim_feedforward=tf_dim_feedforward,
+            max_context_length=max(self.max_context_tokens + self.n_compress_tokens, self.max_seq_length),
         )
-        
-        # Reconstruction decoder (pretrain / regularization)
         self.reconstruction_decoder = ReconstructionDecoder(
             d_model=tf_n_embd,
             n_heads=self.compress_n_heads,
@@ -94,364 +99,421 @@ class RAD(nn.Module):
             max_seq_length=self.max_seq_length,
             dim_feedforward=tf_dim_feedforward,
         )
-        
-        # Latent-type embedding
-        self.latent_type_embedding = nn.Parameter(torch.zeros(1, 1, tf_n_embd))
 
         self.loss_fn = nn.CrossEntropyLoss(reduction='mean', label_smoothing=config['label_smoothing'])
 
-        # Initialize weights
+        nn.init.trunc_normal_(self.type_embedding, std=0.02)
         nn.init.trunc_normal_(self.latent_type_embedding, std=0.02)
+        nn.init.trunc_normal_(self.null_latent_tokens, std=0.02)
+        nn.init.zeros_(self.latent_multiplicative_gate.weight)
+        nn.init.constant_(self.latent_multiplicative_gate.bias, config.get('latent_gate_init_bias', 4.0))
+        nn.init.zeros_(self.latent_gru_gate.weight)
+        nn.init.constant_(self.latent_gru_gate.bias, config.get('latent_gru_init_bias', -2.0))
+        nn.init.zeros_(self.latent_gru_candidate.weight)
+        nn.init.zeros_(self.latent_gru_candidate.bias)
+
+    def _state_ids(self, states):
+        return map_dark_states(states, self.grid_size).to(torch.long)
+
+    def _embed_state(self, states):
+        return self.embed_state(self._state_ids(states))
+
+    def _embed_action(self, actions):
+        return self.embed_action(actions.float())
+
+    def _embed_reward(self, rewards):
+        if rewards.dim() == 2:
+            rewards = rearrange(rewards, 'b t -> b t 1')
+        return self.embed_reward(rewards.float())
+
+    def _build_token_sequence(self, states, actions, rewards, context_lengths=None):
+        state_tokens = self._embed_state(states)
+        action_tokens = self._embed_action(actions)
+        reward_tokens = self._embed_reward(rewards)
+
+        tokens = torch.stack([state_tokens, action_tokens, reward_tokens], dim=2)
+        tokens = tokens + self.type_embedding
+        tokens = rearrange(tokens, 'b t m d -> b (t m) d')
+
+        action_targets = actions.argmax(dim=-1)
+        token_targets = action_targets.repeat_interleave(3, dim=1)
+
+        bsz, timesteps = states.shape[:2]
+        timestep_ids = torch.arange(timesteps, device=states.device).unsqueeze(0).expand(bsz, -1)
+        if context_lengths is None:
+            valid_timesteps = torch.ones_like(timestep_ids, dtype=torch.bool)
+        else:
+            valid_timesteps = timestep_ids < context_lengths.to(states.device).unsqueeze(1)
+
+        valid_tokens = valid_timesteps.repeat_interleave(3, dim=1)
+        token_positions = torch.arange(tokens.shape[1], device=states.device).unsqueeze(0).expand(bsz, -1)
+        state_loss_mask = valid_tokens & (token_positions % 3 == 0)
+
+        return tokens, state_loss_mask, token_targets
+
+    def _typed_state_token(self, states):
+        return self._embed_state(states) + self.type_embedding[:, :, 0, :]
+
+    def _typed_action_token(self, actions):
+        return self._embed_action(actions) + self.type_embedding[:, :, 1, :]
+
+    def _typed_reward_token(self, rewards):
+        return self._embed_reward(rewards) + self.type_embedding[:, :, 2, :]
 
     def _get_attention_mask_for_latent(self, seq_len):
         """Generate attention mask for latent-prefix sequences; True=masked."""
-        # Create mask: False = can attend, True = masked
         mask = torch.zeros((seq_len, seq_len), dtype=torch.bool, device=self.device)
         recent_start = self.n_compress_tokens
         recent_len = seq_len - recent_start
-        
-        # Causal mask for recent tokens attending to each other
+
         if recent_len > 0:
+            # Latent queries must not read current recent tokens; otherwise later
+            # recent outputs can receive future-token information through latents.
+            mask[:recent_start, recent_start:] = True
             recent_mask = torch.triu(
-                torch.ones((recent_len, recent_len), dtype=torch.bool, device=self.device), 
-                diagonal=1
+                torch.ones((recent_len, recent_len), dtype=torch.bool, device=self.device),
+                diagonal=1,
             )
             mask[recent_start:, recent_start:] = recent_mask
-        
+
         return mask
 
-    def _forward_ad_transformer(self, x, has_latent_prefix=False):
-        """
-        Forward pass through AD transformer with proper masking.
-        
-        Args:
-            x: (batch, seq_len, d_model) - input embeddings
-            has_latent_prefix: whether the input starts with latent tokens
-            
-        Returns:
-            output: (batch, seq_len, d_model)
-        """
-        if has_latent_prefix:
-            # Add latent type embedding to latent tokens
-            batch_size = x.shape[0]
-            seq_len = x.shape[1]
-            recent_len = seq_len - self.n_compress_tokens
-            
-            latent_type = self.latent_type_embedding.expand(batch_size, self.n_compress_tokens, -1)
-            zero_type = torch.zeros(batch_size, recent_len, x.size(2), device=x.device)
-            type_emb = torch.cat([latent_type, zero_type], dim=1)
-            x = x + type_emb
-            
-            # Get attention mask for latent prefix
-            attn_mask = self._get_attention_mask_for_latent(seq_len)
-            output = self.ad_transformer(x, attention_mask=attn_mask, use_causal_mask=False)
-        else:
-            # Standard causal masking
-            output = self.ad_transformer(x, use_causal_mask=True)
-        
-        return output
+    def _module_for_current_grad_mode(self, module):
+        if torch.is_grad_enabled():
+            return module
+        return getattr(module, '_orig_mod', module)
 
-    def _compress_sequence(self, context_embed, compression_round):
-        """
-        Compress a sequence using the compression transformer.
-        
-        Args:
-            context_embed: (batch, seq_len, d_model) - embedded transitions
-            compression_round: int - which compression round (for gradient truncation)
-            
-        Returns:
-            latent_tokens: (batch, n_compress_tokens, d_model)
-        """
-        latent_tokens = self.compression_transformer(context_embed)
-        
-        # Gradient truncation after max_gradient_rounds
-        if compression_round >= self.max_gradient_rounds:
+    def _forward_ad_transformer(self, x, has_latent_prefix=False):
+        ad_transformer = self._module_for_current_grad_mode(self.ad_transformer)
+        if not has_latent_prefix:
+            return ad_transformer(x, use_causal_mask=True)
+
+        batch_size = x.shape[0]
+        seq_len = x.shape[1]
+        recent_len = seq_len - self.n_compress_tokens
+        latent_type = self.latent_type_embedding.expand(batch_size, self.n_compress_tokens, -1)
+        zero_type = torch.zeros(batch_size, recent_len, x.size(2), device=x.device)
+        x = x + torch.cat([latent_type, zero_type], dim=1)
+
+        attn_mask = self._get_attention_mask_for_latent(seq_len)
+        return ad_transformer(x, attention_mask=attn_mask, use_causal_mask=False)
+
+    def _update_latent_tokens(self, old_latent_tokens, candidate_latent_tokens):
+        if old_latent_tokens is None or self.latent_update_mode == 'replace':
+            return candidate_latent_tokens
+
+        if old_latent_tokens.shape != candidate_latent_tokens.shape:
+            raise ValueError(
+                f'Latent update shape mismatch: old={old_latent_tokens.shape}, '
+                f'candidate={candidate_latent_tokens.shape}'
+            )
+
+        if self.latent_update_mode == 'residual':
+            return self.latent_residual_norm(old_latent_tokens + candidate_latent_tokens)
+
+        if self.latent_update_mode == 'multiplicative_gate':
+            gate = torch.sigmoid(self.latent_multiplicative_gate(old_latent_tokens))
+            return gate * candidate_latent_tokens
+
+        if self.latent_update_mode == 'gru_gate':
+            update_input = torch.cat([old_latent_tokens, candidate_latent_tokens], dim=-1)
+            update_gate = torch.sigmoid(self.latent_gru_gate(update_input))
+            candidate_delta = torch.tanh(self.latent_gru_candidate(update_input))
+            candidate_state = candidate_latent_tokens + candidate_delta
+            return (1.0 - update_gate) * old_latent_tokens + update_gate * candidate_state
+
+        raise RuntimeError(f'Unhandled latent_update_mode: {self.latent_update_mode}')
+
+    def _compress_sequence(self, context_embed, allow_gradient, old_latent_tokens=None):
+        grad_enabled = torch.is_grad_enabled() and allow_gradient
+        with torch.set_grad_enabled(grad_enabled):
+            compression_transformer = self._module_for_current_grad_mode(self.compression_transformer)
+            latent_tokens = compression_transformer(context_embed)
+            latent_tokens = self._update_latent_tokens(old_latent_tokens, latent_tokens)
+        # Compiled CUDAGraph outputs can be overwritten by later compiled
+        # invocations; latent memory is kept across compression rounds.
+        latent_tokens = latent_tokens.clone()
+        if not allow_gradient:
             latent_tokens = latent_tokens.detach()
-            
         return latent_tokens
 
-    def _memory_sequence_len(self, latent_tokens, recent_context, query_len=1):
-        latent_len = 0 if latent_tokens is None else latent_tokens.shape[1]
+    def _compression_round_allows_gradient(self, compression_round, gradient_start_round):
+        return compression_round >= gradient_start_round
+
+    def _memory_sequence_len(self, latent_tokens, recent_context):
+        latent_len = self.n_compress_tokens if self._uses_latent_prefix(latent_tokens) else 0
         recent_len = 0 if recent_context is None else recent_context.shape[1]
-        return latent_len + recent_len + query_len
+        return latent_len + recent_len
 
-    def _pack_memory_input(self, latent_tokens, recent_context, query_states_embed):
-        """Build the AD input as long-term memory + short-term memory + query."""
+    def _uses_latent_prefix(self, latent_tokens):
+        return latent_tokens is not None or self.always_use_latent_prefix
+
+    def _null_latent_prefix(self, batch_size, device, dtype):
+        return self.null_latent_tokens.to(device=device, dtype=dtype).expand(batch_size, -1, -1)
+
+    def _pack_memory_input(self, latent_tokens, recent_context):
         has_recent = recent_context is not None and recent_context.shape[1] > 0
-
-        if latent_tokens is not None and has_recent:
-            transformer_input, _ = pack([latent_tokens, recent_context, query_states_embed], 'b * d')
-            return transformer_input, True
+        if latent_tokens is None and self.always_use_latent_prefix:
+            if recent_context is None:
+                return recent_context, False
+            latent_tokens = self._null_latent_prefix(
+                batch_size=recent_context.shape[0],
+                device=recent_context.device,
+                dtype=recent_context.dtype,
+            )
         if latent_tokens is not None:
-            transformer_input, _ = pack([latent_tokens, query_states_embed], 'b * d')
-            return transformer_input, True
-        if has_recent:
-            transformer_input, _ = pack([recent_context, query_states_embed], 'b * d')
-            return transformer_input, False
-        return query_states_embed, False
+            if has_recent:
+                return torch.cat([latent_tokens, recent_context], dim=1), True
+            return latent_tokens, True
+        return recent_context, False
 
     def _append_recent(self, recent_context, chunk):
         if recent_context is None or recent_context.shape[1] == 0:
             return chunk
         return torch.cat([recent_context, chunk], dim=1)
 
+    def _uses_latent_prefix_from_state(self, has_latent_tokens):
+        return has_latent_tokens or self.always_use_latent_prefix
+
+    def _memory_sequence_len_from_state(self, has_latent_tokens, recent_len):
+        latent_len = self.n_compress_tokens if self._uses_latent_prefix_from_state(has_latent_tokens) else 0
+        return latent_len + recent_len
+
+    def _count_compressions_until_fits(
+        self,
+        has_latent_tokens,
+        recent_len,
+        compression_round=0,
+        respect_curriculum=True,
+    ):
+        num_compressions = 0
+        while self._memory_sequence_len_from_state(has_latent_tokens, recent_len) > self.max_seq_length:
+            if respect_curriculum and self.max_compressions is not None and compression_round >= self.max_compressions:
+                keep_len = self.max_seq_length
+                if self._uses_latent_prefix_from_state(has_latent_tokens):
+                    keep_len -= self.n_compress_tokens
+                recent_len = min(recent_len, max(0, keep_len))
+                break
+
+            keep_len = min(self.short_memory_keep_tokens, recent_len)
+            prefix_len = recent_len - keep_len
+            if prefix_len <= 0:
+                keep_len = max(0, self.max_seq_length - self.n_compress_tokens)
+                prefix_len = recent_len - keep_len
+                if prefix_len <= 0:
+                    break
+
+            recent_len -= prefix_len
+            has_latent_tokens = True
+            compression_round += 1
+            num_compressions += 1
+
+        return has_latent_tokens, recent_len, num_compressions
+
+    def _count_compressions_for_sequence(self, token_count, respect_curriculum=True):
+        has_latent_tokens = False
+        recent_len = 0
+        compression_round = 0
+        total_compressions = 0
+        cursor = 0
+
+        while cursor < token_count:
+            latent_len = self.n_compress_tokens if self._uses_latent_prefix_from_state(has_latent_tokens) else 0
+            capacity = self.max_seq_length - latent_len
+            remaining = token_count - cursor
+            room = capacity - recent_len
+            take_len = remaining if remaining <= room else max(1, min(room + 1, remaining))
+
+            recent_len += take_len
+            cursor += take_len
+
+            has_latent_tokens, recent_len, num_compressions = self._count_compressions_until_fits(
+                has_latent_tokens=has_latent_tokens,
+                recent_len=recent_len,
+                compression_round=compression_round,
+                respect_curriculum=respect_curriculum,
+            )
+            compression_round += num_compressions
+            total_compressions += num_compressions
+
+        return total_compressions
+
+    def _gradient_start_round(self, total_compressions):
+        if self.max_gradient_rounds <= 0:
+            return total_compressions
+        return max(0, total_compressions - self.max_gradient_rounds)
+
     def _compress_memory_until_fits(
         self,
         latent_tokens,
         recent_context,
-        recent_rewards=None,
+        recent_state_mask=None,
+        recent_targets=None,
         compression_round=0,
-        compute_recon_loss=False,
+        gradient_start_round=0,
         respect_curriculum=True,
     ):
-        """
-        Recursively compress old context into latent memory and keep a recent suffix.
-
-        This is the shared RAD memory update used by both offline training windows
-        and online in-context rollout. The resulting representation is always:
-        latent long-term memory + recent short-term transitions + query.
-        """
-        compression_info = {
-            'num_compressions': 0,
-            'recon_loss': torch.tensor(0.0, device=self.device),
-        }
-
+        compression_info = {'num_compressions': 0}
         if recent_context is None:
-            return latent_tokens, recent_context, recent_rewards, compression_info
+            return latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info
 
-        total_recon_loss = torch.tensor(0.0, device=recent_context.device)
-        query_len = 1
-
-        while self._memory_sequence_len(latent_tokens, recent_context, query_len=query_len) > self.max_seq_length:
+        while self._memory_sequence_len(latent_tokens, recent_context) > self.max_seq_length:
             if respect_curriculum and self.max_compressions is not None and compression_round >= self.max_compressions:
-                keep_len = self.max_seq_length - query_len
-                if latent_tokens is not None:
+                keep_len = self.max_seq_length
+                if self._uses_latent_prefix(latent_tokens):
                     keep_len -= self.n_compress_tokens
                 keep_len = max(0, keep_len)
                 recent_context = recent_context[:, -keep_len:] if keep_len > 0 else recent_context[:, :0]
-                if recent_rewards is not None:
-                    recent_rewards = recent_rewards[:, -keep_len:] if keep_len > 0 else recent_rewards[:, :0]
+                if recent_state_mask is not None:
+                    recent_state_mask = recent_state_mask[:, -keep_len:] if keep_len > 0 else recent_state_mask[:, :0]
+                if recent_targets is not None:
+                    recent_targets = recent_targets[:, -keep_len:] if keep_len > 0 else recent_targets[:, :0]
                 break
 
-            keep_len = min(self.short_memory_keep, recent_context.shape[1])
+            keep_len = min(self.short_memory_keep_tokens, recent_context.shape[1])
             prefix_len = recent_context.shape[1] - keep_len
-
             if prefix_len <= 0:
-                keep_len = max(0, self.max_seq_length - self.n_compress_tokens - query_len)
+                keep_len = max(0, self.max_seq_length - self.n_compress_tokens)
                 prefix_len = recent_context.shape[1] - keep_len
                 if prefix_len <= 0:
                     break
 
-            transition_prefix = recent_context[:, :prefix_len]
-            if latent_tokens is not None:
-                compress_input = torch.cat([latent_tokens, transition_prefix], dim=1)
-            else:
-                compress_input = transition_prefix
-
+            prefix = recent_context[:, :prefix_len]
+            compress_input = torch.cat([latent_tokens, prefix], dim=1) if latent_tokens is not None else prefix
             recent_context = recent_context[:, prefix_len:]
 
-            prefix_rewards = None
-            if recent_rewards is not None:
-                prefix_rewards = recent_rewards[:, :prefix_len]
-                recent_rewards = recent_rewards[:, prefix_len:]
+            if recent_state_mask is not None:
+                recent_state_mask = recent_state_mask[:, prefix_len:]
+            if recent_targets is not None:
+                recent_targets = recent_targets[:, prefix_len:]
 
-            new_latent = self._compress_sequence(compress_input, compression_round)
-
-            if compute_recon_loss and self.training and self.use_recon_reg:
-                reconstructed = self.reconstruction_decoder(new_latent, compress_input.shape[1])
-                position_mse = ((reconstructed - compress_input.detach()) ** 2).mean(dim=-1)
-
-                if (self.use_reward_weighted_recon and prefix_rewards is not None and latent_tokens is None):
-                    reward_weights = 1.0 + (self.reward_weight_multiplier - 1.0) * (prefix_rewards.squeeze(-1) > 0).float()
-                    recon_loss = (position_mse * reward_weights).mean()
-                else:
-                    recon_loss = position_mse.mean()
-
-                total_recon_loss = total_recon_loss + recon_loss
-
-            latent_tokens = new_latent
+            latent_tokens = self._compress_sequence(
+                compress_input,
+                allow_gradient=self._compression_round_allows_gradient(
+                    compression_round,
+                    gradient_start_round,
+                ),
+                old_latent_tokens=latent_tokens,
+            )
             compression_round += 1
             compression_info['num_compressions'] += 1
 
-        compression_info['recon_loss'] = total_recon_loss
-        return latent_tokens, recent_context, recent_rewards, compression_info
+        return latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info
 
-    def _roll_context_into_memory(self, context_embed, rewards=None, compute_recon_loss=False):
-        """Roll an offline context through the same chunked memory update used online."""
+    def _roll_context_into_memory(self, context_embed, state_mask=None, token_targets=None):
         latent_tokens = None
         recent_context = None
-        recent_rewards = None
+        recent_state_mask = None
+        recent_targets = None
         compression_round = 0
-        total_recon_loss = torch.tensor(0.0, device=context_embed.device)
         total_compressions = 0
+        planned_compressions = self._count_compressions_for_sequence(
+            context_embed.shape[1],
+            respect_curriculum=True,
+        )
+        gradient_start_round = self._gradient_start_round(planned_compressions)
         cursor = 0
 
         while cursor < context_embed.shape[1]:
-            latent_len = 0 if latent_tokens is None else self.n_compress_tokens
-            capacity = self.max_seq_length - latent_len - 1
+            latent_len = self.n_compress_tokens if self._uses_latent_prefix(latent_tokens) else 0
+            capacity = self.max_seq_length - latent_len
             recent_len = 0 if recent_context is None else recent_context.shape[1]
             remaining = context_embed.shape[1] - cursor
             room = capacity - recent_len
-
-            if remaining <= room:
-                take_len = remaining
-            else:
-                take_len = max(1, room + 1)
-                take_len = min(take_len, remaining)
+            take_len = remaining if remaining <= room else max(1, min(room + 1, remaining))
 
             chunk = context_embed[:, cursor:cursor + take_len]
             recent_context = self._append_recent(recent_context, chunk)
 
-            if rewards is not None:
-                reward_chunk = rewards[:, cursor:cursor + take_len]
-                recent_rewards = self._append_recent(recent_rewards, reward_chunk)
+            if state_mask is not None:
+                mask_chunk = state_mask[:, cursor:cursor + take_len]
+                recent_state_mask = self._append_recent(recent_state_mask, mask_chunk)
+            if token_targets is not None:
+                target_chunk = token_targets[:, cursor:cursor + take_len]
+                recent_targets = self._append_recent(recent_targets, target_chunk)
 
             cursor += take_len
-
-            latent_tokens, recent_context, recent_rewards, compression_info = self._compress_memory_until_fits(
+            latent_tokens, recent_context, recent_state_mask, recent_targets, info = self._compress_memory_until_fits(
                 latent_tokens=latent_tokens,
                 recent_context=recent_context,
-                recent_rewards=recent_rewards,
+                recent_state_mask=recent_state_mask,
+                recent_targets=recent_targets,
                 compression_round=compression_round,
-                compute_recon_loss=compute_recon_loss,
+                gradient_start_round=gradient_start_round,
                 respect_curriculum=True,
             )
-            compression_round += compression_info['num_compressions']
-            total_compressions += compression_info['num_compressions']
-            total_recon_loss = total_recon_loss + compression_info['recon_loss']
+            compression_round += info['num_compressions']
+            total_compressions += info['num_compressions']
 
-        return latent_tokens, recent_context, {
+        return latent_tokens, recent_context, recent_state_mask, recent_targets, {
             'num_compressions': total_compressions,
-            'recon_loss': total_recon_loss,
         }
 
-    def _forward_with_compression(self, context_embed, query_states_embed, rewards=None):
-        """Forward pass using recursive long-term memory plus short-term context."""
-        latent_tokens, recent_context, compression_info = self._roll_context_into_memory(
-            context_embed,
-            rewards=rewards,
-            compute_recon_loss=True,
-        )
-
-        full_input, has_latent = self._pack_memory_input(latent_tokens, recent_context, query_states_embed)
-        transformer_output = self._forward_ad_transformer(full_input, has_latent_prefix=has_latent)
-
-        return transformer_output, compression_info
-
     def forward(self, x):
-        """
-        Training forward pass with automatic compression for long sequences.
-        
-        All samples in batch have same context length (handled by collate_fn),
-        enabling fully batched GPU processing.
-        """
-        query_states = x['query_states'].to(self.device)
-        target_actions = x['target_actions'].to(self.device)
         states = x['states'].to(self.device)
         actions = x['actions'].to(self.device)
-        next_states = x['next_states'].to(self.device)
         rewards = x['rewards'].to(self.device)
-        rewards = rearrange(rewards, 'b n -> b n 1')
+        context_lengths = x.get('context_lengths')
+        if context_lengths is not None:
+            context_lengths = context_lengths.to(self.device)
 
-        # Embed query state
-        query_states_embed = self.embed_query_state(map_dark_states(query_states, self.grid_size).to(torch.long))
-        query_states_embed = rearrange(query_states_embed, 'b d -> b 1 d')
-
-        # Embed context transitions
-        context, _ = pack([states, actions, rewards, next_states], 'b n *')
-        context_embed = self.embed_context(context)
-
-        # Forward with compression (fully batched - all samples have same length)
-        transformer_output, compression_info = self._forward_with_compression(
-            context_embed, query_states_embed, rewards=rewards
+        tokens, state_mask, token_targets = self._build_token_sequence(
+            states, actions, rewards, context_lengths=context_lengths
+        )
+        latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info = self._roll_context_into_memory(
+            tokens, state_mask=state_mask, token_targets=token_targets
         )
 
-        result = {}
+        transformer_input, has_latent = self._pack_memory_input(latent_tokens, recent_context)
+        transformer_output = self._forward_ad_transformer(transformer_input, has_latent_prefix=has_latent)
+        latent_len = self.n_compress_tokens if has_latent else 0
+        recent_output = transformer_output[:, latent_len:]
 
-        # Predict action from last position
-        logits_actions = self.pred_action(transformer_output[:, -1])
+        logits_actions = self.pred_action(recent_output)
+        selected_logits = logits_actions[recent_state_mask]
+        selected_targets = recent_targets[recent_state_mask]
 
-        loss_action = self.loss_fn(logits_actions, target_actions)
-        acc_action = (logits_actions.argmax(dim=-1) == target_actions).float().mean()
+        loss_action = self.loss_fn(selected_logits, selected_targets)
+        acc_action = (selected_logits.argmax(dim=-1) == selected_targets).float().mean()
 
-        result['loss_action'] = loss_action
-        result['acc_action'] = acc_action
-        result['num_compressions'] = compression_info['num_compressions']
-        
-        # Add reconstruction regularization if enabled
-        if self.training and self.use_recon_reg and compression_info['recon_loss'] != 0.0:
-            result['loss_recon'] = compression_info['recon_loss']
-            result['loss_total'] = loss_action + self.recon_reg_weight * compression_info['recon_loss']
-        else:
-            result['loss_recon'] = torch.tensor(0.0, device=self.device)
-            result['loss_total'] = loss_action
-
-        return result
+        return {
+            'loss_action': loss_action,
+            'loss_total': loss_action,
+            'loss_recon': torch.tensor(0.0, device=self.device),
+            'acc_action': acc_action,
+            'num_compressions': compression_info['num_compressions'],
+        }
 
     def forward_pretrain_compression(self, x):
-        """
-        Pre-training forward pass for compression transformer only.
-        Uses reconstruction loss to learn good compression.
-        """
         states = x['states'].to(self.device)
         actions = x['actions'].to(self.device)
-        next_states = x['next_states'].to(self.device)
         rewards = x['rewards'].to(self.device)
-        rewards = rearrange(rewards, 'b n -> b n 1')
 
-        # Embed context transitions
-        context, _ = pack([states, actions, rewards, next_states], 'b n *')
-        context_embed = self.embed_context(context)
-        
-        # Compress
-        latent_tokens = self.compression_transformer(context_embed)
-        
-        # Reconstruct
-        reconstructed = self.reconstruction_decoder(latent_tokens, context_embed.shape[1])
-        
-        # Reconstruction loss
-        recon_loss = F.mse_loss(reconstructed, context_embed.detach())
-        
-        result = {
+        tokens, _, _ = self._build_token_sequence(states, actions, rewards)
+        latent_tokens = self.compression_transformer(tokens)
+        reconstructed = self.reconstruction_decoder(latent_tokens, tokens.shape[1])
+        recon_loss = F.mse_loss(reconstructed, tokens.detach())
+
+        return {
             'loss_recon': recon_loss,
             'loss_total': recon_loss,
         }
-        
-        return result
 
     @torch.inference_mode()
     def evaluate_in_context(self, vec_env, eval_timesteps, beam_k=0, sample=True):
-        """
-        In-context evaluation with rolling compression.
-        Maintains state across steps, compressing when needed.
-        """
-        outputs = {}
-        outputs['reward_episode'] = []
-        outputs['compression_events'] = []
-
+        outputs = {'reward_episode': [], 'compression_events': []}
         reward_episode = np.zeros(vec_env.num_envs)
-        n_envs = vec_env.num_envs
 
         query_states = vec_env.reset()
         query_states = torch.as_tensor(query_states, device=self.device, dtype=torch.long)
         query_states = rearrange(query_states, 'e d -> e 1 d')
-        query_states_embed = self.embed_query_state(map_dark_states(query_states, self.grid_size))
-        
-        # Initialize: no latent tokens, no transition history
-        latent_tokens = None  # (n_envs, n_compress_tokens, d_model) when set
-        transition_buffer = None  # (n_envs, buffer_len, d_model) - recent transitions
-        
+
+        latent_tokens = None
+        recent_tokens = self._typed_state_token(query_states)
         compression_count = 0
 
         for step in range(eval_timesteps):
-            query_states_prev = query_states.to(torch.float)
-
-            # Build input sequence: long-term memory + short-term memory + query.
-            transformer_input, has_latent = self._pack_memory_input(
-                latent_tokens, transition_buffer, query_states_embed
-            )
-
-            # Forward through AD transformer (GPT-2 style)
+            transformer_input, has_latent = self._pack_memory_input(latent_tokens, recent_tokens)
             output = self._forward_ad_transformer(transformer_input, has_latent_prefix=has_latent)
             logits = self.pred_action(output[:, -1])
 
@@ -464,8 +526,8 @@ class RAD(nn.Module):
 
             query_states, rewards, dones, infos = vec_env.step(actions.cpu().numpy())
 
-            actions_onehot = rearrange(actions, 'e -> e 1 1')
-            actions_onehot = F.one_hot(actions_onehot, num_classes=self.config['num_actions']).float()
+            actions_onehot = rearrange(actions, 'e -> e 1')
+            actions_onehot = F.one_hot(actions_onehot, num_classes=self.num_actions).float()
 
             reward_episode += rewards
             rewards_tensor = torch.as_tensor(rewards, device=self.device, dtype=torch.float)
@@ -477,140 +539,108 @@ class RAD(nn.Module):
             if dones[0]:
                 outputs['reward_episode'].append(reward_episode)
                 reward_episode = np.zeros(vec_env.num_envs)
-
-                states_next = torch.as_tensor(np.stack([info['terminal_observation'] for info in infos]),
-                                              device=self.device, dtype=torch.float)
-                states_next = rearrange(states_next, 'e d -> e 1 d')
+                next_states = torch.as_tensor(
+                    np.stack([info['terminal_observation'] for info in infos]),
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                next_states = rearrange(next_states, 'e d -> e 1 d')
             else:
-                states_next = query_states.to(torch.float)
+                next_states = query_states
 
-            query_states_embed = self.embed_query_state(map_dark_states(query_states, self.grid_size))
+            new_tokens = torch.cat([
+                self._typed_action_token(actions_onehot),
+                self._typed_reward_token(rewards_tensor),
+                self._typed_state_token(next_states),
+            ], dim=1)
+            recent_tokens = torch.cat([recent_tokens, new_tokens], dim=1)
 
-            # Embed new transition
-            new_transition, _ = pack([query_states_prev, actions_onehot, rewards_tensor, states_next], 'e i *')
-            new_transition_embed = self.embed_context(new_transition)  # (e, 1, d_model)
-
-            # Add to buffer
-            if transition_buffer is not None:
-                transition_buffer = torch.cat([transition_buffer, new_transition_embed], dim=1)
-            else:
-                transition_buffer = new_transition_embed
-
-            # Recursively compress old memory if needed, preserving a recent suffix.
-            latent_tokens, transition_buffer, _, compression_info = self._compress_memory_until_fits(
+            latent_tokens, recent_tokens, _, _, info = self._compress_memory_until_fits(
                 latent_tokens=latent_tokens,
-                recent_context=transition_buffer,
+                recent_context=recent_tokens,
                 compression_round=compression_count,
-                compute_recon_loss=False,
                 respect_curriculum=True,
             )
-
-            if compression_info['num_compressions'] > 0:
-                compression_count += compression_info['num_compressions']
-                outputs['compression_events'].extend([step] * compression_info['num_compressions'])
+            if info['num_compressions'] > 0:
+                compression_count += info['num_compressions']
+                outputs['compression_events'].extend([step] * info['num_compressions'])
 
         outputs['reward_episode'] = np.stack(outputs['reward_episode'], axis=1)
         outputs['total_compressions'] = compression_count
-
         return outputs
-    
+
     def set_curriculum(self, max_compressions):
-        """Set curriculum limit on number of compressions."""
         self.max_compressions = max_compressions
-        
+
     def load_pretrained_compression(self, pretrain_checkpoint_path):
-        """Load pre-trained compression transformer weights."""
         checkpoint = torch.load(pretrain_checkpoint_path, map_location=self.device)
-        
-        # Load compression transformer
-        compression_state = {k.replace('compression_transformer.', ''): v 
-                           for k, v in checkpoint['model'].items() 
-                           if 'compression_transformer' in k}
+
+        compression_state = {
+            k.replace('compression_transformer.', ''): v
+            for k, v in checkpoint['model'].items()
+            if 'compression_transformer' in k
+        }
         self.compression_transformer.load_state_dict(compression_state)
-        
-        # Load reconstruction decoder (handle potential shape mismatch in position_queries)
-        decoder_state = {k.replace('reconstruction_decoder.', ''): v 
-                        for k, v in checkpoint['model'].items() 
-                        if 'reconstruction_decoder' in k}
-        
-        # Handle position_queries shape mismatch (pretrain uses smaller max_seq_length)
+
+        decoder_state = {
+            k.replace('reconstruction_decoder.', ''): v
+            for k, v in checkpoint['model'].items()
+            if 'reconstruction_decoder' in k
+        }
         if 'position_queries' in decoder_state:
-            pretrained_pos_queries = decoder_state['position_queries']
-            current_pos_queries = self.reconstruction_decoder.position_queries
-            
-            if pretrained_pos_queries.shape != current_pos_queries.shape:
-                # Copy pretrained weights into the beginning of the larger tensor
-                pretrained_len = pretrained_pos_queries.shape[1]
-                new_pos_queries = current_pos_queries.clone()
-                new_pos_queries[:, :pretrained_len, :] = pretrained_pos_queries
-                decoder_state['position_queries'] = new_pos_queries
-        
+            pretrained = decoder_state['position_queries']
+            current = self.reconstruction_decoder.position_queries
+            if pretrained.shape != current.shape:
+                merged = current.clone()
+                copy_len = min(pretrained.shape[1], current.shape[1])
+                merged[:, :copy_len, :] = pretrained[:, :copy_len, :]
+                decoder_state['position_queries'] = merged
         self.reconstruction_decoder.load_state_dict(decoder_state)
-        
-        # Load embedding layer (shared)
-        if 'embed_context.weight' in checkpoint['model']:
-            self.embed_context.load_state_dict({
-                'weight': checkpoint['model']['embed_context.weight'],
-                'bias': checkpoint['model']['embed_context.bias']
-            })
-        
+
+        for module_name in ['embed_state', 'embed_action', 'embed_reward']:
+            weight_key = f'{module_name}.weight'
+            if weight_key in checkpoint['model']:
+                state = {'weight': checkpoint['model'][weight_key]}
+                bias_key = f'{module_name}.bias'
+                if bias_key in checkpoint['model']:
+                    state['bias'] = checkpoint['model'][bias_key]
+                getattr(self, module_name).load_state_dict(state)
+
+        if 'type_embedding' in checkpoint['model']:
+            self.type_embedding.data.copy_(checkpoint['model']['type_embedding'])
+        if 'latent_type_embedding' in checkpoint['model']:
+            self.latent_type_embedding.data.copy_(checkpoint['model']['latent_type_embedding'])
+        if 'null_latent_tokens' in checkpoint['model']:
+            self.null_latent_tokens.data.copy_(checkpoint['model']['null_latent_tokens'])
+
         print(f"Loaded pre-trained compression from {pretrain_checkpoint_path}")
 
     def load_pretrained_ad(self, ad_checkpoint_path):
-        """
-        Load pre-trained AD model weights into the RAD model.
-        
-        This initializes the AD transformer, embeddings, and action prediction head
-        from a trained AD model. The compression transformer is left randomly initialized
-        and will be trained during finetuning.
-        
-        Args:
-            ad_checkpoint_path: Path to the trained AD checkpoint
-        """
         checkpoint = torch.load(ad_checkpoint_path, map_location='cpu')
         ad_state = checkpoint['model']
-        
-        # Map AD keys to RAD keys
-        # AD uses 'transformer', RAD uses 'ad_transformer'
-        key_mapping = {
-            'transformer.': 'ad_transformer.',
-            'embed_context.': 'embed_context.',
-            'embed_query_state.': 'embed_query_state.',
-            'pred_action.': 'pred_action.',
+
+        transformer_state = {
+            k.replace('transformer.', ''): v
+            for k, v in ad_state.items()
+            if k.startswith('transformer.')
         }
-        
-        # Load AD transformer
-        ad_transformer_state = {}
-        for k, v in ad_state.items():
-            if k.startswith('transformer.'):
-                new_key = k.replace('transformer.', '')
-                ad_transformer_state[new_key] = v
-        
-        if ad_transformer_state:
-            self.ad_transformer.load_state_dict(ad_transformer_state)
-            print(f"  Loaded AD transformer ({len(ad_transformer_state)} params)")
-        
-        # Load embeddings
-        if 'embed_context.weight' in ad_state:
-            self.embed_context.load_state_dict({
-                'weight': ad_state['embed_context.weight'],
-                'bias': ad_state['embed_context.bias']
-            })
-            print("  Loaded embed_context")
-        
-        if 'embed_query_state.weight' in ad_state:
-            self.embed_query_state.load_state_dict({
-                'weight': ad_state['embed_query_state.weight']
-            })
-            print("  Loaded embed_query_state")
-        
-        # Load action prediction head
-        if 'pred_action.weight' in ad_state:
-            self.pred_action.load_state_dict({
-                'weight': ad_state['pred_action.weight'],
-                'bias': ad_state['pred_action.bias']
-            })
-            print("  Loaded pred_action")
-        
+        if transformer_state:
+            self.ad_transformer.load_state_dict(transformer_state)
+            print(f"  Loaded AD transformer ({len(transformer_state)} params)")
+
+        for module_name in ['embed_state', 'embed_action', 'embed_reward', 'pred_action']:
+            weight_key = f'{module_name}.weight'
+            if weight_key in ad_state:
+                state = {'weight': ad_state[weight_key]}
+                bias_key = f'{module_name}.bias'
+                if bias_key in ad_state:
+                    state['bias'] = ad_state[bias_key]
+                getattr(self, module_name).load_state_dict(state)
+                print(f"  Loaded {module_name}")
+
+        if 'type_embedding' in ad_state:
+            self.type_embedding.data.copy_(ad_state['type_embedding'])
+            print("  Loaded type_embedding")
+
         print(f"Loaded pre-trained AD from {ad_checkpoint_path}")
         print("  Note: Compression transformer is randomly initialized")

@@ -1,3 +1,0 @@
-include: config/model/rad_base.yaml
-source_algorithm: dreamer_tbtt
-run_dir: runs/RAD-memory-maze-dreamer-tbtt

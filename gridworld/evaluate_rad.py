@@ -21,6 +21,7 @@ import numpy as np
 from env import SAMPLE_ENVIRONMENT, make_env
 from model import MODEL
 from stable_baselines3.common.vec_env import DummyVecEnv
+from utils import normalize_compiled_state_dict
 
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
 seed = 0
@@ -60,7 +61,11 @@ if __name__ == '__main__':
     
     model_name = config['model']
     model = MODEL[model_name](config).to(device)
-    model.load_state_dict(ckpt['model'])
+    load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
+    if load_result.missing_keys:
+        print(f'Missing model keys initialized from current config: {load_result.missing_keys}')
+    if load_result.unexpected_keys:
+        print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
     model.eval()
 
     env_name = config['env']
@@ -70,10 +75,11 @@ if __name__ == '__main__':
     print(f"Evaluation goals: {test_env_args}")
     print(f"Max sequence length: {config['n_transit']}")
     print(f"Compression tokens: {config.get('n_compress_tokens', 'N/A')}")
+    print(f"Latent update mode: {config.get('latent_update_mode', 'replace')}")
 
     if env_name == 'darkroom':
         envs = DummyVecEnv([make_env(config, goal=arg) for arg in test_env_args])
-    elif env_name == 'dark_key_to_door':
+    elif env_name == 'dktd':
         envs = DummyVecEnv([make_env(config, key=arg[:2], goal=arg[2:]) for arg in test_env_args])
     else:
         raise ValueError('Unsupported env')
@@ -103,8 +109,9 @@ if __name__ == '__main__':
     with open(result_path, 'wb') as f:
         np.save(f, test_rewards)
 
-    for i in range(len(test_env_args)):
-        print(f'Env {i} (goal={test_env_args[i]}): {test_rewards[i]}')
+    if env_name == 'darkroom':
+        for i in range(len(test_env_args)):
+            print(f'Env {i} (goal={test_env_args[i]}): {test_rewards[i]}')
 
     print("Mean reward per environment:", test_rewards.mean(axis=1))
     print("Overall mean reward: ", test_rewards.mean())

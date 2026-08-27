@@ -3,20 +3,31 @@ include: config/model/ad_base.yaml
 model: AD
 
 # Transformer - larger for more complex task
-tf_n_embd: 32
+tf_n_embd: 64
 tf_n_layer: 4
 tf_n_head: 4
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 128
-n_transit: 250  
+tf_dim_feedforward: 256  # Effective FFN width used by GPT2Transformer
+n_transit: 100  
 
 # training
 lr: 0.0003
 train_batch_size: 512
-test_batch_size: 2048
-train_source_timesteps: 2000
+test_batch_size: 512
+train_source_timesteps: 1000
 train_timesteps: 50000
 num_warmup_steps: 1000  
+
+# Compile tensor-heavy transformer while leaving training/eval loops eager.
+torch_compile: True
+torch_compile_modules:
+  - transformer
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
+torch_compile_cudagraphs: False
 
 num_workers: 4

@@ -1,3 +1,0 @@
-include: config/model/rad_dreamer_tbtt.yaml
-latent_update_mode: replace
-run_dir: runs/RAD-memory-maze-dreamer-tbtt-replace

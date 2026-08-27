@@ -1,2 +1,4 @@
 alg: PPO
 policy: MlpPolicy
+device: cpu
+tensorboard_log: None

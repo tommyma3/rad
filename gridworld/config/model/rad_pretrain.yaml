@@ -2,28 +2,41 @@ include: config/model/ad_base.yaml
 
 model: RAD
 
-# Compression Transformer (must match cad_dr.yaml)
-tf_n_embd: 64           # Match cad_dr.yaml
-tf_n_layer: 4           # Match cad_dr.yaml  
-tf_n_head: 4            # Match cad_dr.yaml
+# Compression Transformer (must match rad_dr.yaml)
+tf_n_embd: 64           # Match rad_dr.yaml
+tf_n_layer: 4           # Match rad_dr.yaml
+tf_n_head: 4            # Match rad_dr.yaml
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
-tf_n_inner: 128         # Match cad_dr.yaml
-n_transit: 60           # Match cad_dr.yaml - smaller context window
+tf_n_inner: 128         # Match rad_dr.yaml
+tf_dim_feedforward: 256 # Match the effective RAD FFN width
+n_transit: 40           # 40 environment timesteps = 120 transformer tokens
 
-# Compression Settings (must match cad_dr.yaml)
-n_compress_tokens: 16   # Match cad_dr.yaml - compact latent
-compress_n_layers: 3    # Match cad_dr.yaml
-compress_n_heads: 4     # Match cad_dr.yaml
+# Compression Settings (must match rad_dr.yaml)
+n_compress_tokens: 15   # Must be a multiple of 3 for s/a/r token consistency
+always_use_latent_prefix: True
+compress_n_layers: 3    # Match rad_dr.yaml
+compress_n_heads: 4     # Match rad_dr.yaml
 
 # Pre-training specific
-pretrain_timesteps: 35000   # Smaller model needs less pretraining
+pretrain_timesteps: 40000   # Smaller model needs less pretraining
 pretrain_batch_size: 512    # Larger batch for smaller model
 pretrain_lr: 0.0003
-pretrain_warmup_steps: 1000
+pretrain_warmup_steps: 3000
 
 # Dataset
+max_context_length: 1000
 train_source_timesteps: 1000
 train_n_stream: 100
+
+# Compile tensor-heavy compression modules while leaving the pretrain wrapper eager.
+torch_compile: True
+torch_compile_modules:
+  - compression_transformer
+  - reconstruction_decoder
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
 
 num_workers: 16

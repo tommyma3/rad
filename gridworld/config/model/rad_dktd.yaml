@@ -2,41 +2,38 @@ include: config/model/ad_base.yaml
 
 model: RAD
 
-# AD Transformer - match AD's proven config for DKTD
-# Using same embedding dim as AD (32) which works well
+# AD Transformer - match AD's proven config for DKTD.
+# n_transit is environment timesteps; internally this is 3 * n_transit s/a/r tokens.
 tf_n_embd: 64
 tf_n_layer: 4
 tf_n_head: 4
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
-tf_n_inner: 128         # 4x embedding dim
-n_transit: 120           # Larger context for more complex task
+tf_n_inner: 256         # 4x embedding dim
+tf_dim_feedforward: 256 # Effective FFN width used by RAD modules
+gradient_checkpointing: False
+n_transit: 72          # 120 environment timesteps = 360 transformer tokens
 
 # Compression Settings
-n_compress_tokens: 48   # More tokens to capture key+door info
-short_memory_keep: 36   # Recent uncompressed transitions kept after each recursive compression
+n_compress_tokens: 60   # Must be a multiple of 3 for s/a/r token consistency
+always_use_latent_prefix: True
+short_memory_keep: 10   # Recent uncompressed environment timesteps kept after compression
 compress_n_layers: 4    # Deeper compression for better representation
 compress_n_heads: 4
+latent_update_mode: gru_gate
 
-# Gradient control
-max_gradient_rounds: 99
-
-# Reconstruction regularization - keep low to prioritize action prediction
-use_recon_reg: True
-recon_reg_weight: 0.1   # Reduced - action loss should dominate
-
-# Reward-weighted reconstruction (during fine-tuning)
-# Gives higher weight to transitions with positive rewards (key-finding and door-reaching)
-use_reward_weighted_recon: False
-reward_weight_multiplier: 0.0  # 5x weight for reward transitions
+# Gradient control: keep gradients through the most recent compression rounds.
+max_gradient_rounds: 5
 
 # Curriculum settings (None = unlimited)
 max_compressions: null
 
 # Dataset settings
-# With n_transit=80, compression triggers at ~59 steps
+# With always_use_latent_prefix=True, 48 latent slots are reserved first.
+# Compression triggers after roughly 104 recent environment timesteps.
 min_context_length: 100
-max_context_length: 1500
+max_context_length: 1000
+rad_batching_strategy: compression_buckets
 
 # Curriculum with stage-specific length distributions
 curriculum_schedule:
@@ -61,7 +58,7 @@ curriculum_schedule:
       medium: 0.35
       long: 0.35
       very_long: 0.15
-  - step: 70000
+  - step: 75000
     max_compressions: null
     length_distribution:
       short: 0.15
@@ -70,19 +67,38 @@ curriculum_schedule:
       very_long: 0.25
 
 # Training
-lr: 0.0003
-train_batch_size: 128
-test_batch_size: 256
-train_source_timesteps: 2000
+lr: 0.0003              # Backward-compatible fallback learning rate
+ad_lr: 0.0003           # AD transformer, token embeddings, and action head
+compression_lr: 0.0001  # Pretrained compressor and reconstruction decoder
+latent_lr: 0.0003       # Latent prefix and latent-update modules
+train_batch_size: 1024
+test_batch_size: 1024
+train_source_timesteps: 1000
 train_timesteps: 100000
 num_warmup_steps: 2000
 
 # Curriculum-aware LR scheduler settings
-stage_warmup_steps: 500
+stage_warmup_steps: 2000
 min_lr_ratio: 0.1
 
 # Best model tracking
 save_best_model: True
 early_stopping_patience: 10
+
+# Speed-oriented diagnostics/evaluation defaults
+progress_interval: 50
+eval_num_train_envs: 0
+eval_num_test_envs: 33
+in_context_eval_episodes: 100
+
+# Compile tensor-heavy submodules while leaving RAD recurrence eager.
+torch_compile: True
+torch_compile_modules:
+  - ad_transformer
+  - compression_transformer
+torch_compile_mode: reduce-overhead
+torch_compile_dynamic: True
+torch_compile_fullgraph: False
+torch_compile_suppress_errors: True
 
 num_workers: 4

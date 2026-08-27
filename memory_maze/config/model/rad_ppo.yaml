@@ -1,3 +1,0 @@
-include: config/model/rad_base.yaml
-source_algorithm: ppo
-run_dir: runs/RAD-memory-maze-ppo
