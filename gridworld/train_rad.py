@@ -45,7 +45,7 @@ from env import make_env
 import numpy as np
 import torch.nn.functional as F
 from functools import partial
-from optimizer_utils import build_rad_optimizer_param_groups
+from optimizer_utils import build_rad_optimizer_param_groups, configure_rad_finetuning
 
 
 def configure_torch_runtime(config):
@@ -406,6 +406,8 @@ if __name__ == '__main__':
             if load_result.unexpected_keys:
                 print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
 
+    # Loaded null/query tokens remain fixed during end-to-end RAD training.
+    configure_rad_finetuning(model)
     model = maybe_compile_model(model, config, is_main)
 
     if is_main:

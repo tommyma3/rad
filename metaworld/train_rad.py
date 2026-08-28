@@ -44,7 +44,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 import numpy as np
 from optimizer_utils import (
     build_rad_optimizer_param_groups,
-    freeze_reconstruction_decoder_for_finetuning,
+    configure_rad_finetuning,
 )
 
 CHECKPOINT_FORMAT = 'metaworld-sar-v1'
@@ -405,9 +405,8 @@ if __name__ == '__main__':
             if load_result.unexpected_keys:
                 print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
 
-    # Reconstruction is a compression-pretraining objective only. The decoder
-    # remains part of checkpoints, but is not optimized during RAD fine-tuning.
-    freeze_reconstruction_decoder_for_finetuning(model)
+    # Loaded null/query tokens and the decoder remain fixed during fine-tuning.
+    configure_rad_finetuning(model)
     model = maybe_compile_model(model, config, is_main)
 
     if is_main:
