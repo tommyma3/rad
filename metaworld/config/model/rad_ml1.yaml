@@ -21,7 +21,7 @@ compress_n_heads: 4
 latent_update_mode: gru_gate
 
 # Gradient control
-max_gradient_rounds: 9999999
+max_gradient_rounds: 6
 
 # Curriculum settings (None = unlimited)
 max_compressions: null
