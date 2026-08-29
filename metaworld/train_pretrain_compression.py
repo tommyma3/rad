@@ -27,7 +27,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import CompressionPretrainDataset
 from model import MODEL
-from optimizer_utils import configure_compression_pretraining
 from utils import (
     checkpoint_state_dict,
     configure_torch_runtime,
@@ -176,8 +175,13 @@ if __name__ == '__main__':
         print(f'Data loading ended at {load_end_time}')
         print(f'Elapsed time: {load_end_time - load_start_time}')
 
-    # Include both learned compression queries and the null-memory prefix.
-    compression_params = configure_compression_pretraining(model)
+    # Optimizer - only for compression-related parameters
+    compression_params = list(model.compression_transformer.parameters()) + \
+                        list(model.reconstruction_decoder.parameters()) + \
+                        list(model.embed_state.parameters()) + \
+                        list(model.embed_action.parameters()) + \
+                        list(model.embed_reward.parameters()) + \
+                        [model.type_embedding]
     
     optimizer = AdamW(
         compression_params, 

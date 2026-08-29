@@ -8,6 +8,7 @@ SPEC = importlib.util.spec_from_file_location('metaworld_optimizer_utils', ROOT 
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 build_rad_optimizer_param_groups = MODULE.build_rad_optimizer_param_groups
+freeze_reconstruction_decoder_for_finetuning = MODULE.freeze_reconstruction_decoder_for_finetuning
 
 
 class FakeParameter:
@@ -16,8 +17,6 @@ class FakeParameter:
 
 
 class FakeModel:
-    latent_update_mode = 'gru_gate'
-
     def __init__(self, named_parameters):
         self._named_parameters = named_parameters
 
@@ -25,18 +24,39 @@ class FakeModel:
         return iter(self._named_parameters)
 
 
+class FakeModule:
+    def __init__(self, parameters):
+        self._parameters = parameters
+
+    def requires_grad_(self, requires_grad):
+        for parameter in self._parameters:
+            parameter.requires_grad = requires_grad
+        return self
+
+
 class MetaWorldRADOptimizerGroupsTest(unittest.TestCase):
+    def test_reconstruction_decoder_is_frozen_for_finetuning(self):
+        decoder_parameter = FakeParameter()
+        model = FakeModel([
+            ('reconstruction_decoder.layers.0.weight', decoder_parameter),
+        ])
+        model.reconstruction_decoder = FakeModule([decoder_parameter])
+
+        freeze_reconstruction_decoder_for_finetuning(model)
+        groups = build_rad_optimizer_param_groups(model, {'lr': 1e-3})
+
+        self.assertFalse(decoder_parameter.requires_grad)
+        self.assertEqual(groups, [])
+
     def test_continuous_model_parameters_are_partitioned(self):
         ad = FakeParameter()
         compression = FakeParameter()
-        gate = FakeParameter()
+        latent = FakeParameter()
         groups = build_rad_optimizer_param_groups(
             FakeModel([
                 ('embed_state.weight', ad),
                 ('compression_transformer._orig_mod.layers.0.weight', compression),
-                ('latent_gru_candidate.weight', gate),
-                ('null_latent_tokens', FakeParameter(requires_grad=False)),
-                ('reconstruction_decoder.position_queries', FakeParameter(requires_grad=False)),
+                ('latent_gru_gate.weight', latent),
             ]),
             {
                 'lr': 1e-3,
@@ -48,21 +68,11 @@ class MetaWorldRADOptimizerGroupsTest(unittest.TestCase):
         by_name = {group['group_name']: group for group in groups}
         self.assertEqual(by_name['ad']['params'], [ad])
         self.assertEqual(by_name['compression']['params'], [compression])
-        self.assertEqual(by_name['latent']['params'], [gate])
-
-    def test_frozen_queries_cannot_enter_optimizer(self):
-        model = FakeModel([
-            ('compression_transformer.compress_queries', FakeParameter()),
-        ])
-
-        with self.assertRaisesRegex(ValueError, 'unexpectedly marked trainable'):
-            build_rad_optimizer_param_groups(model, {'lr': 1e-3})
-
-    def test_non_allowlisted_latent_parameter_is_rejected(self):
-        model = FakeModel([('latent_type_embedding', FakeParameter())])
-
-        with self.assertRaisesRegex(ValueError, 'unexpectedly marked trainable'):
-            build_rad_optimizer_param_groups(model, {'lr': 1e-3})
+        self.assertEqual(by_name['latent']['params'], [latent])
+        self.assertEqual(
+            [by_name[name]['lr'] for name in ('ad', 'compression', 'latent')],
+            [3e-4, 1e-4, 6e-4],
+        )
 
 
 if __name__ == '__main__':
