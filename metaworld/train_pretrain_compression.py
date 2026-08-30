@@ -93,8 +93,8 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='rad_pretrain_ml1',
-                       help='Model config name (without .yaml extension)')
+    parser.add_argument('--config', type=str, default='rad_ml1',
+                       help='RAD config name (without .yaml extension)')
     parser.add_argument('--override', '-o', default='',
                        help='Override config entries, e.g. "task=push-v3|train_source_timesteps=10000"')
     args = parser.parse_args()
@@ -102,6 +102,7 @@ if __name__ == '__main__':
     config = get_config('./config/env/ml1.yaml')
     config.update(get_config('./config/algorithm/ppo_ml1.yaml'))
     config.update(get_config(f'./config/model/{args.config}.yaml'))
+    config.update(config.pop('pretrain'))
     apply_overrides(config, args.override)
 
     # Set seed for reproducibility
