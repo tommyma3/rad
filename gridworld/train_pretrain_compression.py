@@ -25,9 +25,8 @@ import torch
 from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import CompressionBucketBatchSampler, CompressionPretrainDataset
+from dataset import CompressionPretrainDataset
 from model import MODEL
-from optimizer_utils import build_compression_pretraining_parameters
 from utils import (
     checkpoint_state_dict,
     configure_torch_runtime,
@@ -42,20 +41,15 @@ from transformers import get_cosine_schedule_with_warmup
 import multiprocessing
 from tqdm import tqdm
 
-COMPRESSION_PRETRAIN_CONTRACT = 'recurrent-transition-v1'
 
-
-def pretrain_collate_fn(batch, num_actions):
+def pretrain_collate_fn(batch, grid_size):
     """Collate function for pre-training dataset (no query states/targets)."""
     import numpy as np
     import torch.nn.functional as F
     
     res = {}
     res['states'] = torch.tensor(np.array([item['states'] for item in batch]), requires_grad=False, dtype=torch.float)
-    res['actions'] = F.one_hot(
-        torch.tensor(np.array([item['actions'] for item in batch]), requires_grad=False, dtype=torch.long),
-        num_classes=num_actions,
-    )
+    res['actions'] = F.one_hot(torch.tensor(np.array([item['actions'] for item in batch]), requires_grad=False, dtype=torch.long), num_classes=5)
     res['rewards'] = torch.tensor(np.array([item['rewards'] for item in batch]), dtype=torch.float, requires_grad=False)
     res['next_states'] = torch.tensor(np.array([item['next_states'] for item in batch]), requires_grad=False, dtype=torch.float)
     
@@ -63,18 +57,18 @@ def pretrain_collate_fn(batch, num_actions):
 
 
 def get_pretrain_data_loader(dataset, batch_size, config, shuffle=True):
-    """Data loader grouped by exact recurrent compression count."""
+    """Data loader for pre-training with custom collate function."""
     from torch.utils.data import DataLoader
     from functools import partial
-    sampler = CompressionBucketBatchSampler(dataset, batch_size, shuffle=shuffle, drop_last=False)
-    collate_fn = partial(pretrain_collate_fn, num_actions=config['num_actions'])
-    num_workers = config.get('pretrain_num_workers', config['num_workers'])
+    
+    collate_fn = partial(pretrain_collate_fn, grid_size=config['grid_size'])
     return DataLoader(
-        dataset,
-        batch_sampler=sampler,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        persistent_workers=num_workers > 0,
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        collate_fn=collate_fn, 
+        num_workers=config['num_workers'], 
+        persistent_workers=True
     )
 
 
@@ -82,14 +76,12 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default=None,
+    parser.add_argument('--config', type=str, default='rad_pretrain',
                        help='Model config name (without .yaml extension)')
     parser.add_argument('--env', type=str, default='darkroom',
                        help='Environment name: darkroom or dktd')
-    parser.add_argument('--env_split_seed', type=int, default=None,
-                       help='Override env_split_seed from environment config')
     args = parser.parse_args()
-
+    
     # Determine config files based on environment
     env_config_map = {
         'darkroom': ('darkroom', 'ppo_darkroom'),
@@ -98,23 +90,18 @@ if __name__ == '__main__':
     if args.env not in env_config_map:
         raise ValueError(f'Unknown environment: {args.env}')
     env_cfg, alg_cfg = env_config_map[args.env]
-    model_config = args.config or {'darkroom': 'rad_dr', 'dktd': 'rad_dktd'}[args.env]
-
+    
     # Load configs
     config = get_config(f'./config/env/{env_cfg}.yaml')
     config.update(get_config(f'./config/algorithm/{alg_cfg}.yaml'))
-    config.update(get_config(f'./config/model/{model_config}.yaml'))
-
-    # Override env_split_seed if provided via CLI
-    if args.env_split_seed is not None:
-        config['env_split_seed'] = args.env_split_seed
+    config.update(get_config(f'./config/model/{args.config}.yaml'))
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
 
     runs_root = config.get('runs_root', './runs')
     default_run_name = f"RAD-pretrain-{config['env']}-seed{config['env_split_seed']}"
-    run_name = config.get('pretrain_run_name', default_run_name)
+    run_name = config.get('run_name', default_run_name)
     log_dir = path.join(runs_root, run_name)
     
     # Check if already exists
@@ -181,7 +168,13 @@ if __name__ == '__main__':
         print(f'Data loading ended at {load_end_time}')
         print(f'Elapsed time: {load_end_time - load_start_time}')
 
-    compression_params = build_compression_pretraining_parameters(model)
+    # Optimizer - only for compression-related parameters
+    compression_params = list(model.compression_transformer.parameters()) + \
+                        list(model.reconstruction_decoder.parameters()) + \
+                        list(model.embed_state.parameters()) + \
+                        list(model.embed_action.parameters()) + \
+                        list(model.embed_reward.parameters()) + \
+                        [model.type_embedding]
     
     optimizer = AdamW(
         compression_params, 
@@ -203,8 +196,6 @@ if __name__ == '__main__':
     if len(ckpt_paths) > 0:
         ckpt_path = ckpt_paths[-1]
         ckpt = torch.load(ckpt_path, map_location=config['device'])
-        if ckpt.get('compression_pretrain_contract') != COMPRESSION_PRETRAIN_CONTRACT:
-            raise ValueError(f'{ckpt_path} does not use {COMPRESSION_PRETRAIN_CONTRACT}; start a new pretraining run')
         load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_sched.load_state_dict(ckpt['lr_sched'])
@@ -216,14 +207,9 @@ if __name__ == '__main__':
             if load_result.unexpected_keys:
                 print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
 
-    pretrain_compile_config = dict(config)
-    pretrain_compile_config['torch_compile_modules'] = config.get(
-        'pretrain_torch_compile_modules',
-        ['compression_transformer', 'reconstruction_decoder'],
-    )
     model = maybe_compile_model(
         model,
-        pretrain_compile_config,
+        config,
         is_main,
         default_modules=['compression_transformer', 'reconstruction_decoder'],
     )
@@ -237,6 +223,9 @@ if __name__ == '__main__':
         start_time = datetime.now()
         print(f'Pre-training started at {start_time}')
 
+    # Get unwrapped model for calling custom methods (DDP wrapping hides them)
+    unwrapped_model = accelerator.unwrap_model(model)
+
     # Training loop
     with tqdm(total=config['pretrain_timesteps'], position=0, leave=True, disable=not is_main) as pbar:
         pbar.update(step)
@@ -247,7 +236,7 @@ if __name__ == '__main__':
             step += 1
             
             with accelerator.autocast():
-                output = model(batch, pretrain_compression=True)
+                output = unwrapped_model.forward_pretrain_compression(batch)
             
             loss = output['loss_recon']
 
@@ -279,7 +268,6 @@ if __name__ == '__main__':
                 unwrapped_model = accelerator.unwrap_model(model)
                 
                 torch.save({
-                    'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
                     'step': step,
                     'config': config,
                     'model': checkpoint_state_dict(unwrapped_model),
@@ -295,7 +283,6 @@ if __name__ == '__main__':
         final_path = path.join(config['log_dir'], 'pretrain-final.pt')
         unwrapped_model = accelerator.unwrap_model(model)
         torch.save({
-            'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
             'step': step,
             'config': config,
             'model': checkpoint_state_dict(unwrapped_model),

@@ -74,17 +74,6 @@ test_source_timesteps: 2500
 train_timesteps: 100000
 num_warmup_steps: 2000
 
-# Recurrent compression pretraining (uses this same architecture/config)
-pretrain_timesteps: 50000
-pretrain_batch_size: 256
-pretrain_lr: 0.0003
-pretrain_warmup_steps: 3000
-pretrain_min_compressions: 1
-pretrain_max_compressions: 6
-pretrain_torch_compile_modules:
-  - compression_transformer
-  - reconstruction_decoder
-
 train_n_seed: 50
 train_n_stream: 100
 
@@ -115,4 +104,3 @@ torch_compile_fullgraph: False
 torch_compile_suppress_errors: True
 
 num_workers: 4
-pretrain_num_workers: 4

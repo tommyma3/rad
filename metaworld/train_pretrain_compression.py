@@ -25,9 +25,8 @@ import torch
 from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import CompressionBucketBatchSampler, CompressionPretrainDataset
+from dataset import CompressionPretrainDataset
 from model import MODEL
-from optimizer_utils import build_compression_pretraining_parameters
 from utils import (
     checkpoint_state_dict,
     configure_torch_runtime,
@@ -43,7 +42,6 @@ import multiprocessing
 from tqdm import tqdm
 
 CHECKPOINT_FORMAT = 'metaworld-sar-v1'
-COMPRESSION_PRETRAIN_CONTRACT = 'recurrent-transition-v1'
 
 
 def apply_overrides(config, override):
@@ -76,16 +74,16 @@ def pretrain_collate_fn(batch):
 
 
 def get_pretrain_data_loader(dataset, batch_size, config, shuffle=True):
-    """Data loader grouped by exact recurrent compression count."""
+    """Data loader for pre-training with custom collate function."""
     from torch.utils.data import DataLoader
-    sampler = CompressionBucketBatchSampler(dataset, batch_size, shuffle=shuffle, drop_last=False)
-    num_workers = config.get('pretrain_num_workers', config['num_workers'])
+    collate_fn = pretrain_collate_fn
     return DataLoader(
-        dataset,
-        batch_sampler=sampler,
-        collate_fn=pretrain_collate_fn,
-        num_workers=num_workers,
-        persistent_workers=num_workers > 0
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        collate_fn=collate_fn, 
+        num_workers=config['num_workers'], 
+        persistent_workers=config['num_workers'] > 0
     )
 
 
@@ -93,7 +91,7 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='rad_ml1',
+    parser.add_argument('--config', type=str, default='rad_pretrain_ml1',
                        help='Model config name (without .yaml extension)')
     parser.add_argument('--override', '-o', default='',
                        help='Override config entries, e.g. "task=push-v3|train_source_timesteps=10000"')
@@ -109,7 +107,7 @@ if __name__ == '__main__':
 
     runs_root = config.get('runs_root', './runs')
     default_run_name = f"RAD-pretrain-ml1-{config['task']}"
-    run_name = config.get('pretrain_run_name', default_run_name)
+    run_name = config.get('run_name', default_run_name)
     log_dir = path.join(runs_root, run_name)
     
     # Check if already exists
@@ -177,7 +175,13 @@ if __name__ == '__main__':
         print(f'Data loading ended at {load_end_time}')
         print(f'Elapsed time: {load_end_time - load_start_time}')
 
-    compression_params = build_compression_pretraining_parameters(model)
+    # Optimizer - only for compression-related parameters
+    compression_params = list(model.compression_transformer.parameters()) + \
+                        list(model.reconstruction_decoder.parameters()) + \
+                        list(model.embed_state.parameters()) + \
+                        list(model.embed_action.parameters()) + \
+                        list(model.embed_reward.parameters()) + \
+                        [model.type_embedding]
     
     optimizer = AdamW(
         compression_params, 
@@ -204,8 +208,6 @@ if __name__ == '__main__':
                 f'{ckpt_path} uses the legacy packed-transition checkpoint format; '
                 'start a new pretraining run'
             )
-        if ckpt.get('compression_pretrain_contract') != COMPRESSION_PRETRAIN_CONTRACT:
-            raise ValueError(f'{ckpt_path} does not use {COMPRESSION_PRETRAIN_CONTRACT}; start a new pretraining run')
         load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_sched.load_state_dict(ckpt['lr_sched'])
@@ -217,14 +219,9 @@ if __name__ == '__main__':
             if load_result.unexpected_keys:
                 print(f'Unexpected model keys ignored: {load_result.unexpected_keys}')
 
-    pretrain_compile_config = dict(config)
-    pretrain_compile_config['torch_compile_modules'] = config.get(
-        'pretrain_torch_compile_modules',
-        ['compression_transformer', 'reconstruction_decoder'],
-    )
     model = maybe_compile_model(
         model,
-        pretrain_compile_config,
+        config,
         is_main,
         default_modules=['compression_transformer', 'reconstruction_decoder'],
     )
@@ -238,6 +235,9 @@ if __name__ == '__main__':
         start_time = datetime.now()
         print(f'Pre-training started at {start_time}')
 
+    # Get unwrapped model for calling custom methods (DDP wrapping hides them)
+    unwrapped_model = accelerator.unwrap_model(model)
+
     # Training loop
     with tqdm(total=config['pretrain_timesteps'], position=0, leave=True, disable=not is_main) as pbar:
         pbar.update(step)
@@ -248,7 +248,7 @@ if __name__ == '__main__':
             step += 1
             
             with accelerator.autocast():
-                output = model(batch, pretrain_compression=True)
+                output = unwrapped_model.forward_pretrain_compression(batch)
             
             loss = output['loss_recon']
 
@@ -281,7 +281,6 @@ if __name__ == '__main__':
                 
                 torch.save({
                     'format': CHECKPOINT_FORMAT,
-                    'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
                     'step': step,
                     'config': config,
                     'model': checkpoint_state_dict(unwrapped_model),
@@ -298,7 +297,6 @@ if __name__ == '__main__':
         unwrapped_model = accelerator.unwrap_model(model)
         torch.save({
             'format': CHECKPOINT_FORMAT,
-            'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
             'step': step,
             'config': config,
             'model': checkpoint_state_dict(unwrapped_model),

@@ -1,14 +1,13 @@
-import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1] / 'gridworld'
-SPEC = importlib.util.spec_from_file_location('gridworld_optimizer_utils', ROOT / 'optimizer_utils.py')
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
-build_rad_optimizer_param_groups = MODULE.build_rad_optimizer_param_groups
-freeze_reconstruction_decoder_for_finetuning = MODULE.freeze_reconstruction_decoder_for_finetuning
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GRIDWORLD_TEST_ROOT = REPO_ROOT / 'gridworld_test'
+sys.path.insert(0, str(GRIDWORLD_TEST_ROOT))
+
+from optimizer_utils import build_rad_optimizer_param_groups  # noqa: E402
 
 
 class FakeParameter:
@@ -22,16 +21,6 @@ class FakeModel:
 
     def named_parameters(self):
         return iter(self._named_parameters)
-
-
-class FakeModule:
-    def __init__(self, parameters):
-        self._parameters = parameters
-
-    def requires_grad_(self, requires_grad):
-        for parameter in self._parameters:
-            parameter.requires_grad = requires_grad
-        return self
 
 
 class RADOptimizerParamGroupsTest(unittest.TestCase):
@@ -49,8 +38,6 @@ class RADOptimizerParamGroupsTest(unittest.TestCase):
             ('pred_action.bias', frozen_parameter),
         ])
 
-        model.reconstruction_decoder = FakeModule([decoder_parameter])
-        freeze_reconstruction_decoder_for_finetuning(model)
         groups = build_rad_optimizer_param_groups(model, {
             'lr': 1e-3,
             'ad_lr': 3e-4,
@@ -64,7 +51,7 @@ class RADOptimizerParamGroupsTest(unittest.TestCase):
         self.assertEqual(groups_by_name['compression']['lr'], 1e-4)
         self.assertEqual(
             groups_by_name['compression']['params'],
-            [compression_parameter],
+            [compression_parameter, decoder_parameter],
         )
         self.assertEqual(groups_by_name['latent']['lr'], 6e-4)
         self.assertEqual(groups_by_name['latent']['params'], [latent_parameter])

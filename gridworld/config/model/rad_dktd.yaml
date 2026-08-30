@@ -12,7 +12,7 @@ tf_attn_dropout: 0.1
 tf_n_inner: 256         # 4x embedding dim
 tf_dim_feedforward: 256 # Effective FFN width used by RAD modules
 gradient_checkpointing: False
-n_transit: 72          # 72 environment timesteps = 216 transformer tokens
+n_transit: 72          # 120 environment timesteps = 360 transformer tokens
 
 # Compression Settings
 n_compress_tokens: 60   # Must be a multiple of 3 for s/a/r token consistency
@@ -29,8 +29,8 @@ max_gradient_rounds: 5
 max_compressions: null
 
 # Dataset settings
-# With always_use_latent_prefix=False, the first window has all 72 raw timesteps.
-# Later windows reserve 60 latent slots (20 timestep-equivalents).
+# With always_use_latent_prefix=True, 48 latent slots are reserved first.
+# Compression triggers after roughly 104 recent environment timesteps.
 min_context_length: 100
 max_context_length: 1000
 rad_batching_strategy: compression_buckets
@@ -77,17 +77,6 @@ train_source_timesteps: 1000
 train_timesteps: 100000
 num_warmup_steps: 2000
 
-# Recurrent compression pretraining (uses this same architecture/config)
-pretrain_timesteps: 50000
-pretrain_batch_size: 1024
-pretrain_lr: 0.0003
-pretrain_warmup_steps: 2000
-pretrain_min_compressions: 1
-pretrain_max_compressions: 5
-pretrain_torch_compile_modules:
-  - compression_transformer
-  - reconstruction_decoder
-
 # Curriculum-aware LR scheduler settings
 stage_warmup_steps: 2000
 min_lr_ratio: 0.1
@@ -113,4 +102,3 @@ torch_compile_fullgraph: False
 torch_compile_suppress_errors: True
 
 num_workers: 4
-pretrain_num_workers: 16

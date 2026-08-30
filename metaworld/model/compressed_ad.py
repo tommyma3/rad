@@ -338,9 +338,6 @@ class RAD(nn.Module):
         return has_latent_tokens, recent_len, num_compressions
 
     def _count_compressions_for_sequence(self, token_count, respect_curriculum=True):
-        if token_count % 3 != 0:
-            raise ValueError(f'RAD context must contain complete s/a/r triplets, got {token_count} tokens')
-
         has_latent_tokens = False
         recent_len = 0
         compression_round = 0
@@ -352,7 +349,7 @@ class RAD(nn.Module):
             capacity = self.max_seq_length - latent_len
             remaining = token_count - cursor
             room = capacity - recent_len
-            take_len = remaining if remaining <= room else min(room + 3, remaining)
+            take_len = remaining if remaining <= room else max(1, min(room + 1, remaining))
 
             recent_len += take_len
             cursor += take_len
@@ -373,43 +370,6 @@ class RAD(nn.Module):
             return total_compressions
         return max(0, total_compressions - self.max_gradient_rounds)
 
-    def _count_recurrent_compressions(self, timesteps, respect_curriculum=False):
-        has_latent_tokens = False
-        recent_len = 1
-        compression_round = 0
-        total_compressions = 0
-        for _ in range(timesteps):
-            recent_len += 3
-            has_latent_tokens, recent_len, count = self._count_compressions_until_fits(
-                has_latent_tokens,
-                recent_len,
-                compression_round=compression_round,
-                respect_curriculum=respect_curriculum,
-            )
-            compression_round += count
-            total_compressions += count
-        return total_compressions
-
-    def _append_recurrent_transition(
-        self,
-        latent_tokens,
-        recent_tokens,
-        transition_tokens,
-        compression_round=0,
-        gradient_start_round=0,
-        respect_curriculum=True,
-        collect_transitions=False,
-    ):
-        recent_tokens = self._append_recent(recent_tokens, transition_tokens)
-        return self._compress_memory_until_fits(
-            latent_tokens=latent_tokens,
-            recent_context=recent_tokens,
-            compression_round=compression_round,
-            gradient_start_round=gradient_start_round,
-            respect_curriculum=respect_curriculum,
-            collect_transitions=collect_transitions,
-        )
-
     def _compress_memory_until_fits(
         self,
         latent_tokens,
@@ -419,9 +379,8 @@ class RAD(nn.Module):
         compression_round=0,
         gradient_start_round=0,
         respect_curriculum=True,
-        collect_transitions=False,
     ):
-        compression_info = {'num_compressions': 0, 'transitions': []}
+        compression_info = {'num_compressions': 0}
         if recent_context is None:
             return latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info
 
@@ -447,18 +406,7 @@ class RAD(nn.Module):
                     break
 
             prefix = recent_context[:, :prefix_len]
-            previous_latent_tokens = latent_tokens
-            if previous_latent_tokens is None and self.always_use_latent_prefix:
-                previous_latent_tokens = self._null_latent_prefix(
-                    prefix.shape[0],
-                    prefix.device,
-                    prefix.dtype,
-                )
-            compress_input = (
-                torch.cat([previous_latent_tokens, prefix], dim=1)
-                if previous_latent_tokens is not None
-                else prefix
-            )
+            compress_input = torch.cat([latent_tokens, prefix], dim=1) if latent_tokens is not None else prefix
             recent_context = recent_context[:, prefix_len:]
 
             if recent_state_mask is not None:
@@ -472,37 +420,20 @@ class RAD(nn.Module):
                     compression_round,
                     gradient_start_round,
                 ),
-                old_latent_tokens=previous_latent_tokens,
+                old_latent_tokens=latent_tokens,
             )
-            if collect_transitions:
-                compression_info['transitions'].append({
-                    'compression_input': compress_input,
-                    'updated_latent_tokens': latent_tokens,
-                })
             compression_round += 1
             compression_info['num_compressions'] += 1
 
         return latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info
 
-    def _roll_context_into_memory(
-        self,
-        context_embed,
-        state_mask=None,
-        token_targets=None,
-        collect_transitions=False,
-    ):
-        if context_embed.shape[1] % 3 != 0:
-            raise ValueError(
-                f'RAD context must contain complete s/a/r triplets, got {context_embed.shape[1]} tokens'
-            )
-
+    def _roll_context_into_memory(self, context_embed, state_mask=None, token_targets=None):
         latent_tokens = None
         recent_context = None
         recent_state_mask = None
         recent_targets = None
         compression_round = 0
         total_compressions = 0
-        transitions = []
         planned_compressions = self._count_compressions_for_sequence(
             context_embed.shape[1],
             respect_curriculum=True,
@@ -516,7 +447,7 @@ class RAD(nn.Module):
             recent_len = 0 if recent_context is None else recent_context.shape[1]
             remaining = context_embed.shape[1] - cursor
             room = capacity - recent_len
-            take_len = remaining if remaining <= room else min(room + 3, remaining)
+            take_len = remaining if remaining <= room else max(1, min(room + 1, remaining))
 
             chunk = context_embed[:, cursor:cursor + take_len]
             recent_context = self._append_recent(recent_context, chunk)
@@ -537,21 +468,15 @@ class RAD(nn.Module):
                 compression_round=compression_round,
                 gradient_start_round=gradient_start_round,
                 respect_curriculum=True,
-                collect_transitions=collect_transitions,
             )
             compression_round += info['num_compressions']
             total_compressions += info['num_compressions']
-            transitions.extend(info['transitions'])
 
         return latent_tokens, recent_context, recent_state_mask, recent_targets, {
             'num_compressions': total_compressions,
-            'transitions': transitions,
         }
 
-    def forward(self, x, pretrain_compression=False):
-        if pretrain_compression:
-            return self.forward_pretrain_compression(x)
-
+    def forward(self, x):
         states = x['states'].to(self.device)
         actions = x['actions'].to(self.device)
         rewards = x['rewards'].to(self.device)
@@ -588,52 +513,15 @@ class RAD(nn.Module):
         states = x['states'].to(self.device)
         actions = x['actions'].to(self.device)
         rewards = x['rewards'].to(self.device)
-        next_states = x['next_states'].to(self.device)
 
-        action_tokens = self._typed_action_token(actions)
-        reward_tokens = self._typed_reward_token(rewards)
-        next_state_tokens = self._typed_state_token(next_states)
-        latent_tokens = None
-        recent_tokens = self._typed_state_token(states[:, :1])
-        compression_round = 0
-        planned_compressions = self._count_recurrent_compressions(states.shape[1])
-        gradient_start_round = self._gradient_start_round(planned_compressions)
-        transitions = []
-        for timestep in range(states.shape[1]):
-            transition_tokens = torch.cat([
-                action_tokens[:, timestep:timestep + 1],
-                reward_tokens[:, timestep:timestep + 1],
-                next_state_tokens[:, timestep:timestep + 1],
-            ], dim=1)
-            latent_tokens, recent_tokens, _, _, info = self._append_recurrent_transition(
-                latent_tokens,
-                recent_tokens,
-                transition_tokens,
-                compression_round=compression_round,
-                gradient_start_round=gradient_start_round,
-                respect_curriculum=False,
-                collect_transitions=True,
-            )
-            compression_round += info['num_compressions']
-            transitions.extend(info['transitions'])
-        if not transitions:
-            raise ValueError('Compression pretraining sample did not produce a recurrent transition')
-
-        transition_losses = []
-        for transition in transitions:
-            compression_input = transition['compression_input']
-            updated_latent_tokens = transition['updated_latent_tokens']
-            reconstructed = self.reconstruction_decoder(
-                updated_latent_tokens,
-                compression_input.shape[1],
-            )
-            transition_losses.append(F.mse_loss(reconstructed, compression_input.detach()))
-        recon_loss = torch.stack(transition_losses).mean()
+        tokens, _, _ = self._build_token_sequence(states, actions, rewards)
+        latent_tokens = self.compression_transformer(tokens)
+        reconstructed = self.reconstruction_decoder(latent_tokens, tokens.shape[1])
+        recon_loss = F.mse_loss(reconstructed, tokens.detach())
 
         return {
             'loss_recon': recon_loss,
             'loss_total': recon_loss,
-            'num_compressions': compression_round,
         }
 
     @torch.inference_mode()
@@ -696,10 +584,11 @@ class RAD(nn.Module):
                 self._typed_reward_token(rewards_tensor),
                 self._typed_state_token(next_states),
             ], dim=1)
-            latent_tokens, recent_tokens, _, _, info = self._append_recurrent_transition(
-                latent_tokens,
-                recent_tokens,
-                new_tokens,
+            recent_tokens = torch.cat([recent_tokens, new_tokens], dim=1)
+
+            latent_tokens, recent_tokens, _, _, info = self._compress_memory_until_fits(
+                latent_tokens=latent_tokens,
+                recent_context=recent_tokens,
                 compression_round=compression_count,
                 respect_curriculum=True,
             )
@@ -734,11 +623,6 @@ class RAD(nn.Module):
             raise ValueError(
                 f'{pretrain_checkpoint_path} uses the legacy packed-transition format; '
                 're-run compression pretraining for the state/action/reward model'
-            )
-        if checkpoint.get('compression_pretrain_contract') != 'recurrent-transition-v1':
-            raise ValueError(
-                f'{pretrain_checkpoint_path} does not use recurrent-transition-v1; '
-                're-run compression pretraining'
             )
 
         compression_state = {
@@ -778,21 +662,6 @@ class RAD(nn.Module):
             self.latent_type_embedding.data.copy_(checkpoint['model']['latent_type_embedding'])
         if 'null_latent_tokens' in checkpoint['model']:
             self.null_latent_tokens.data.copy_(checkpoint['model']['null_latent_tokens'])
-
-        for module_name in [
-            'latent_residual_norm',
-            'latent_multiplicative_gate',
-            'latent_gru_gate',
-            'latent_gru_candidate',
-        ]:
-            prefix = f'{module_name}.'
-            module_state = {
-                key[len(prefix):]: value
-                for key, value in checkpoint['model'].items()
-                if key.startswith(prefix)
-            }
-            if module_state:
-                getattr(self, module_name).load_state_dict(module_state)
 
         print(f"Loaded pre-trained compression from {pretrain_checkpoint_path}")
 
