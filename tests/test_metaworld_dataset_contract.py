@@ -69,7 +69,15 @@ class MetaWorldDatasetContractTest(unittest.TestCase):
             pretrain = MODULE.CompressionPretrainDataset(
                 config, root, 'test', n_stream=1, source_timesteps=6, n_seed=1
             )
-            self.assertEqual(pretrain[0]['actions'].shape, (4, 2))
+            self.assertEqual(pretrain.window_size, 3)
+            self.assertEqual(pretrain[0]['actions'].shape, (3, 2))
+
+            config['always_use_latent_prefix'] = False
+            without_prefix = MODULE.CompressionPretrainDataset(
+                config, root, 'test', n_stream=1, source_timesteps=6, n_seed=1
+            )
+            self.assertEqual(without_prefix.window_size, 4)
+            self.assertEqual(without_prefix[0]['actions'].shape, (4, 2))
 
 
 if __name__ == '__main__':

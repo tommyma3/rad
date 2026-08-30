@@ -30,6 +30,21 @@ def _rad_parameter_group(name):
     return 'ad'
 
 
+def build_compression_pretraining_parameters(model):
+    """Return the parameters used by compression reconstruction pretraining."""
+    parameters = (
+        list(model.compression_transformer.parameters())
+        + list(model.reconstruction_decoder.parameters())
+        + list(model.embed_state.parameters())
+        + list(model.embed_action.parameters())
+        + list(model.embed_reward.parameters())
+        + [model.type_embedding]
+    )
+    if model.always_use_latent_prefix:
+        parameters.append(model.null_latent_tokens)
+    return parameters
+
+
 def build_rad_optimizer_param_groups(model, config):
     """Partition every trainable RAD parameter into one learning-rate group."""
     fallback_lr = float(config['lr'])

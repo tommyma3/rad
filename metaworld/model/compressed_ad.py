@@ -406,7 +406,16 @@ class RAD(nn.Module):
                     break
 
             prefix = recent_context[:, :prefix_len]
-            compress_input = torch.cat([latent_tokens, prefix], dim=1) if latent_tokens is not None else prefix
+            previous_latent_tokens = latent_tokens
+            if previous_latent_tokens is None and self.always_use_latent_prefix:
+                previous_latent_tokens = self._null_latent_prefix(
+                    prefix.shape[0], prefix.device, prefix.dtype
+                )
+            compress_input = (
+                torch.cat([previous_latent_tokens, prefix], dim=1)
+                if previous_latent_tokens is not None
+                else prefix
+            )
             recent_context = recent_context[:, prefix_len:]
 
             if recent_state_mask is not None:
@@ -515,9 +524,14 @@ class RAD(nn.Module):
         rewards = x['rewards'].to(self.device)
 
         tokens, _, _ = self._build_token_sequence(states, actions, rewards)
-        latent_tokens = self.compression_transformer(tokens)
-        reconstructed = self.reconstruction_decoder(latent_tokens, tokens.shape[1])
-        recon_loss = F.mse_loss(reconstructed, tokens.detach())
+        compression_input = tokens
+        if self.always_use_latent_prefix:
+            null_prefix = self._null_latent_prefix(tokens.shape[0], tokens.device, tokens.dtype)
+            compression_input = torch.cat([null_prefix, tokens], dim=1)
+
+        latent_tokens = self.compression_transformer(compression_input)
+        reconstructed = self.reconstruction_decoder(latent_tokens, compression_input.shape[1])
+        recon_loss = F.mse_loss(reconstructed, compression_input.detach())
 
         return {
             'loss_recon': recon_loss,
