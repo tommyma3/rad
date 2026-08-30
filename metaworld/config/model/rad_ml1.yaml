@@ -3,14 +3,14 @@ include: config/model/ad_base.yaml
 model: RAD
 
 # AD Transformer
-tf_n_embd: 64
+tf_n_embd: 128
 tf_n_layer: 4
 tf_n_head: 8
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
 tf_n_inner: 1024
 tf_dim_feedforward: 1024
-n_transit: 100           # Reduced context window for efficiency
+n_transit: 120           # Reduced context window for efficiency
 
 # Compression Settings
 n_compress_tokens: 60    # Multiple of 3 for state/action/reward token consistency
