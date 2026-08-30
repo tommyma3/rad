@@ -104,15 +104,3 @@ torch_compile_fullgraph: False
 torch_compile_suppress_errors: True
 
 num_workers: 4
-
-# Compression pretraining overrides. The pretraining entry point overlays this
-# section onto the shared RAD configuration before constructing the model.
-pretrain:
-  pretrain_timesteps: 50000
-  pretrain_batch_size: 256
-  pretrain_lr: 0.0003
-  pretrain_warmup_steps: 3000
-
-  torch_compile_modules:
-    - compression_transformer
-    - reconstruction_decoder

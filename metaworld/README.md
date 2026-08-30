@@ -19,7 +19,7 @@ tasks in the `test/` subdirectory.
 
 ```bash
 uv run accelerate launch train.py --config ad_ml1
-uv run accelerate launch train_pretrain_compression.py --config rad_ml1
+uv run accelerate launch train_pretrain_compression.py --config rad_pretrain_ml1
 uv run accelerate launch train_rad.py --config rad_ml1
 ```
 

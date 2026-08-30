@@ -27,7 +27,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import CompressionPretrainDataset
 from model import MODEL
-from optimizer_utils import build_compression_pretraining_parameters
 from utils import (
     checkpoint_state_dict,
     configure_torch_runtime,
@@ -43,7 +42,6 @@ import multiprocessing
 from tqdm import tqdm
 
 CHECKPOINT_FORMAT = 'metaworld-sar-v1'
-COMPRESSION_PRETRAIN_CONTRACT = 'null-latent-full-reconstruction-v1'
 
 
 def apply_overrides(config, override):
@@ -93,8 +91,8 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='rad_ml1',
-                       help='RAD config name (without .yaml extension)')
+    parser.add_argument('--config', type=str, default='rad_pretrain_ml1',
+                       help='Model config name (without .yaml extension)')
     parser.add_argument('--override', '-o', default='',
                        help='Override config entries, e.g. "task=push-v3|train_source_timesteps=10000"')
     args = parser.parse_args()
@@ -102,7 +100,6 @@ if __name__ == '__main__':
     config = get_config('./config/env/ml1.yaml')
     config.update(get_config('./config/algorithm/ppo_ml1.yaml'))
     config.update(get_config(f'./config/model/{args.config}.yaml'))
-    config.update(config.pop('pretrain'))
     apply_overrides(config, args.override)
 
     # Set seed for reproducibility
@@ -179,7 +176,12 @@ if __name__ == '__main__':
         print(f'Elapsed time: {load_end_time - load_start_time}')
 
     # Optimizer - only for compression-related parameters
-    compression_params = build_compression_pretraining_parameters(model)
+    compression_params = list(model.compression_transformer.parameters()) + \
+                        list(model.reconstruction_decoder.parameters()) + \
+                        list(model.embed_state.parameters()) + \
+                        list(model.embed_action.parameters()) + \
+                        list(model.embed_reward.parameters()) + \
+                        [model.type_embedding]
     
     optimizer = AdamW(
         compression_params, 
@@ -204,11 +206,6 @@ if __name__ == '__main__':
         if ckpt.get('format') != CHECKPOINT_FORMAT:
             raise ValueError(
                 f'{ckpt_path} uses the legacy packed-transition checkpoint format; '
-                'start a new pretraining run'
-            )
-        if ckpt.get('compression_pretrain_contract') != COMPRESSION_PRETRAIN_CONTRACT:
-            raise ValueError(
-                f'{ckpt_path} predates null-latent full-input reconstruction; '
                 'start a new pretraining run'
             )
         load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
@@ -284,7 +281,6 @@ if __name__ == '__main__':
                 
                 torch.save({
                     'format': CHECKPOINT_FORMAT,
-                    'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
                     'step': step,
                     'config': config,
                     'model': checkpoint_state_dict(unwrapped_model),
@@ -301,7 +297,6 @@ if __name__ == '__main__':
         unwrapped_model = accelerator.unwrap_model(model)
         torch.save({
             'format': CHECKPOINT_FORMAT,
-            'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
             'step': step,
             'config': config,
             'model': checkpoint_state_dict(unwrapped_model),

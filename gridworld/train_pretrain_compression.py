@@ -27,7 +27,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import CompressionPretrainDataset
 from model import MODEL
-from optimizer_utils import build_compression_pretraining_parameters
 from utils import (
     checkpoint_state_dict,
     configure_torch_runtime,
@@ -41,9 +40,6 @@ from transformers import get_cosine_schedule_with_warmup
 
 import multiprocessing
 from tqdm import tqdm
-
-
-COMPRESSION_PRETRAIN_CONTRACT = 'null-latent-full-reconstruction-v1'
 
 
 def pretrain_collate_fn(batch, grid_size):
@@ -80,31 +76,25 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default=None,
-                       help='RAD config name (without .yaml extension); defaults based on --env')
+    parser.add_argument('--config', type=str, default='rad_pretrain',
+                       help='Model config name (without .yaml extension)')
     parser.add_argument('--env', type=str, default='darkroom',
                        help='Environment name: darkroom or dktd')
-    parser.add_argument('--env_split_seed', type=int, default=None,
-                       help='Override env_split_seed from the config')
     args = parser.parse_args()
     
     # Determine config files based on environment
     env_config_map = {
-        'darkroom': ('darkroom', 'ppo_darkroom', 'rad_dr'),
-        'dktd': ('dktd', 'ppo_dktd', 'rad_dktd'),
+        'darkroom': ('darkroom', 'ppo_darkroom'),
+        'dktd': ('dktd', 'ppo_dktd'),
     }
     if args.env not in env_config_map:
         raise ValueError(f'Unknown environment: {args.env}')
-    env_cfg, alg_cfg, default_model_cfg = env_config_map[args.env]
-    model_cfg = args.config or default_model_cfg
+    env_cfg, alg_cfg = env_config_map[args.env]
     
     # Load configs
     config = get_config(f'./config/env/{env_cfg}.yaml')
     config.update(get_config(f'./config/algorithm/{alg_cfg}.yaml'))
-    config.update(get_config(f'./config/model/{model_cfg}.yaml'))
-    config.update(config.pop('pretrain'))
-    if args.env_split_seed is not None:
-        config['env_split_seed'] = args.env_split_seed
+    config.update(get_config(f'./config/model/{args.config}.yaml'))
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
@@ -179,7 +169,12 @@ if __name__ == '__main__':
         print(f'Elapsed time: {load_end_time - load_start_time}')
 
     # Optimizer - only for compression-related parameters
-    compression_params = build_compression_pretraining_parameters(model)
+    compression_params = list(model.compression_transformer.parameters()) + \
+                        list(model.reconstruction_decoder.parameters()) + \
+                        list(model.embed_state.parameters()) + \
+                        list(model.embed_action.parameters()) + \
+                        list(model.embed_reward.parameters()) + \
+                        [model.type_embedding]
     
     optimizer = AdamW(
         compression_params, 
@@ -201,11 +196,6 @@ if __name__ == '__main__':
     if len(ckpt_paths) > 0:
         ckpt_path = ckpt_paths[-1]
         ckpt = torch.load(ckpt_path, map_location=config['device'])
-        if ckpt.get('compression_pretrain_contract') != COMPRESSION_PRETRAIN_CONTRACT:
-            raise ValueError(
-                f'{ckpt_path} predates null-latent full-input reconstruction; '
-                'start a new pretraining run'
-            )
         load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_sched.load_state_dict(ckpt['lr_sched'])
@@ -278,7 +268,6 @@ if __name__ == '__main__':
                 unwrapped_model = accelerator.unwrap_model(model)
                 
                 torch.save({
-                    'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
                     'step': step,
                     'config': config,
                     'model': checkpoint_state_dict(unwrapped_model),
@@ -294,7 +283,6 @@ if __name__ == '__main__':
         final_path = path.join(config['log_dir'], 'pretrain-final.pt')
         unwrapped_model = accelerator.unwrap_model(model)
         torch.save({
-            'compression_pretrain_contract': COMPRESSION_PRETRAIN_CONTRACT,
             'step': step,
             'config': config,
             'model': checkpoint_state_dict(unwrapped_model),

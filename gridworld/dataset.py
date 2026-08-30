@@ -541,18 +541,7 @@ class CompressionPretrainDataset(Dataset):
     def __init__(self, config, traj_dir, mode='train', n_stream=None, source_timesteps=None):
         self.config = config
         self.env = config['env']
-        self.n_transit = config['n_transit']
-        self.n_compress_tokens = config.get('n_compress_tokens', 15)
-        if self.n_compress_tokens % 3 != 0:
-            raise ValueError('n_compress_tokens must be divisible by 3 for S/A/R token consistency')
-        self.always_use_latent_prefix = config.get('always_use_latent_prefix', False)
-        reserved_timesteps = self.n_compress_tokens // 3 if self.always_use_latent_prefix else 0
-        self.window_size = self.n_transit - reserved_timesteps
-        if self.window_size <= 0:
-            raise ValueError(
-                'n_transit must leave at least one uncompressed timestep after reserving '
-                'the null latent prefix'
-            )
+        self.window_size = config['n_transit']  # Environment timesteps to compress
         self.dynamics = config['dynamics']
         
         if self.env == 'darkroom':

@@ -24,7 +24,6 @@ def make_probe(max_gradient_rounds=2, max_compressions=None):
     rad.n_compress_tokens = 3
     rad.short_memory_keep_tokens = 3
     rad.always_use_latent_prefix = True
-    object.__setattr__(rad, 'null_latent_tokens', torch.zeros(1, 3, 4))
     rad.max_gradient_rounds = max_gradient_rounds
     rad.max_compressions = max_compressions
     decisions = []

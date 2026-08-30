@@ -1,4 +1,3 @@
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -6,17 +5,11 @@ from pathlib import Path
 import torch
 
 
-ROOT = Path(__file__).resolve().parents[1] / 'gridworld'
-sys.path.insert(0, str(ROOT))
-SPEC = importlib.util.spec_from_file_location(
-    'gridworld_gradient_model',
-    ROOT / 'model' / '__init__.py',
-    submodule_search_locations=[str(ROOT / 'model')],
-)
-PACKAGE = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = PACKAGE
-SPEC.loader.exec_module(PACKAGE)
-RAD = PACKAGE.RAD
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GRIDWORLD_TEST_ROOT = REPO_ROOT / 'gridworld_test'
+sys.path.insert(0, str(GRIDWORLD_TEST_ROOT))
+
+from model.compressed_ad import RAD  # noqa: E402
 
 
 def make_rad_probe(max_gradient_rounds=2, max_compressions=None):
@@ -25,7 +18,6 @@ def make_rad_probe(max_gradient_rounds=2, max_compressions=None):
     rad.n_compress_tokens = 3
     rad.short_memory_keep_tokens = 3
     rad.always_use_latent_prefix = True
-    object.__setattr__(rad, 'null_latent_tokens', torch.zeros(1, 3, 4))
     rad.max_gradient_rounds = max_gradient_rounds
     rad.max_compressions = max_compressions
 
