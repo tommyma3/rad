@@ -16,7 +16,7 @@ n_transit: 30           # 40 environment timesteps = 120 transformer tokens
 
 # Compression Settings - compact latent representation
 n_compress_tokens: 15   # Must be a multiple of 3 for s/a/r token consistency
-always_use_latent_prefix: True
+always_use_latent_prefix: False
 short_memory_keep: 5   # Recent uncompressed environment timesteps kept after compression
 compress_n_layers: 3
 compress_n_heads: 4
