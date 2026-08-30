@@ -76,25 +76,31 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='rad_pretrain',
-                       help='Model config name (without .yaml extension)')
+    parser.add_argument('--config', type=str, default=None,
+                       help='RAD config name (without .yaml extension); defaults based on --env')
     parser.add_argument('--env', type=str, default='darkroom',
                        help='Environment name: darkroom or dktd')
+    parser.add_argument('--env_split_seed', type=int, default=None,
+                       help='Override env_split_seed from the config')
     args = parser.parse_args()
     
     # Determine config files based on environment
     env_config_map = {
-        'darkroom': ('darkroom', 'ppo_darkroom'),
-        'dktd': ('dktd', 'ppo_dktd'),
+        'darkroom': ('darkroom', 'ppo_darkroom', 'rad_dr'),
+        'dktd': ('dktd', 'ppo_dktd', 'rad_dktd'),
     }
     if args.env not in env_config_map:
         raise ValueError(f'Unknown environment: {args.env}')
-    env_cfg, alg_cfg = env_config_map[args.env]
+    env_cfg, alg_cfg, default_model_cfg = env_config_map[args.env]
+    model_cfg = args.config or default_model_cfg
     
     # Load configs
     config = get_config(f'./config/env/{env_cfg}.yaml')
     config.update(get_config(f'./config/algorithm/{alg_cfg}.yaml'))
-    config.update(get_config(f'./config/model/{args.config}.yaml'))
+    config.update(get_config(f'./config/model/{model_cfg}.yaml'))
+    config.update(config.pop('pretrain'))
+    if args.env_split_seed is not None:
+        config['env_split_seed'] = args.env_split_seed
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))

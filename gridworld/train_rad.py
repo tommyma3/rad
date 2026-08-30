@@ -291,6 +291,8 @@ if __name__ == '__main__':
                        help='Model config name (without .yaml extension)')
     parser.add_argument('--env', type=str, default='darkroom',
                        help='Environment name: darkroom or dktd')
+    parser.add_argument('--env_split_seed', type=int, default=None,
+                       help='Override env_split_seed from the config')
     args = parser.parse_args()
     
     multiprocessing.set_start_method('spawn', force=True)
@@ -305,6 +307,8 @@ if __name__ == '__main__':
     else:
         raise ValueError(f'Unknown environment: {args.env}')
     config.update(get_config(f'./config/model/{args.config}.yaml'))
+    if args.env_split_seed is not None:
+        config['env_split_seed'] = args.env_split_seed
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
