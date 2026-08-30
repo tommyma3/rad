@@ -69,9 +69,9 @@ class MetaWorldDatasetContractTest(unittest.TestCase):
             pretrain = MODULE.CompressionPretrainDataset(
                 config, root, 'test', n_stream=1, source_timesteps=6, n_seed=1
             )
-            self.assertEqual(pretrain[0]['actions'].shape, (4, 2))
+            self.assertEqual(pretrain.compression_buckets, [1])
+            self.assertEqual(pretrain[0]['actions'].shape, (5, 2))
 
 
 if __name__ == '__main__':
     unittest.main()
-

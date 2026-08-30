@@ -12,7 +12,7 @@ tf_attn_dropout: 0.1
 tf_n_inner: 128         # 2x embedding dim
 tf_dim_feedforward: 256 # Effective FFN width used by RAD modules
 gradient_checkpointing: False
-n_transit: 30           # 40 environment timesteps = 120 transformer tokens
+n_transit: 30           # 30 environment timesteps = 90 transformer tokens
 
 # Compression Settings - compact latent representation
 n_compress_tokens: 15   # Must be a multiple of 3 for s/a/r token consistency
@@ -29,10 +29,10 @@ max_gradient_rounds: 5
 max_compressions: null
 
 # Dataset settings
-# With always_use_latent_prefix=True, 15 latent slots are reserved first.
-# Compression triggers after roughly 35 recent environment timesteps.
+# With always_use_latent_prefix=False, the first window has all 30 raw timesteps.
+# Later windows reserve 15 latent slots (5 timestep-equivalents).
 # Length categories adjusted accordingly:
-#   short: 20-50 (20-35 no compression, longer short windows compress)
+#   short: 20-50 (20-30 no compression, longer short windows compress)
 #   medium: 60-150 (1-2 compressions)
 #   long: 200-400 (3-8 compressions)
 #   very_long: 500-1000 (10+ compressions)
@@ -87,6 +87,17 @@ train_source_timesteps: 1000
 train_timesteps: 100000
 num_warmup_steps: 2000
 
+# Recurrent compression pretraining (uses this same architecture/config)
+pretrain_timesteps: 40000
+pretrain_batch_size: 512
+pretrain_lr: 0.0003
+pretrain_warmup_steps: 3000
+pretrain_min_compressions: 1
+pretrain_max_compressions: 5
+pretrain_torch_compile_modules:
+  - compression_transformer
+  - reconstruction_decoder
+
 # Curriculum-aware LR scheduler settings
 stage_warmup_steps: 1000   # Warmup steps at each curriculum stage transition
 min_lr_ratio: 0.1         # Minimum LR as ratio of base LR (10% of base)
@@ -112,3 +123,4 @@ torch_compile_fullgraph: False
 torch_compile_suppress_errors: True
 
 num_workers: 4
+pretrain_num_workers: 16

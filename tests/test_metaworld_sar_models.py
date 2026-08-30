@@ -45,12 +45,13 @@ def config(model):
     }
 
 
-def batch():
+def batch(timesteps=4):
     return {
-        'states': torch.randn(2, 4, 3),
-        'actions': torch.randn(2, 4, 2).clamp(-1, 1),
-        'rewards': torch.randn(2, 4),
-        'context_lengths': torch.tensor([4, 4]),
+        'states': torch.randn(2, timesteps, 3),
+        'next_states': torch.randn(2, timesteps, 3),
+        'actions': torch.randn(2, timesteps, 2).clamp(-1, 1),
+        'rewards': torch.randn(2, timesteps),
+        'context_lengths': torch.tensor([timesteps, timesteps]),
     }
 
 
@@ -88,6 +89,47 @@ class FakeActionSpace:
 
 
 class MetaWorldSARTokenTest(unittest.TestCase):
+    def test_compression_pretraining_uses_and_trains_enabled_null_prefix(self):
+        for enabled, timesteps in ((True, 8), (False, 9)):
+            with self.subTest(enabled=enabled):
+                model_config = config('RAD')
+                model_config['always_use_latent_prefix'] = enabled
+                model = RAD(model_config)
+                captured_inputs = []
+                hook = model.compression_transformer.register_forward_pre_hook(
+                    lambda _module, args: captured_inputs.append(args[0].detach().clone())
+                )
+
+                output = model(batch(timesteps), pretrain_compression=True)
+                hook.remove()
+                output['loss_recon'].backward()
+
+                self.assertEqual(captured_inputs[0].shape[1], 10)
+                self.assertEqual(len(captured_inputs), 2)
+                self.assertEqual(output['num_compressions'], 2)
+                self.assertGreater(model.latent_gru_gate.weight.grad.abs().sum().item(), 0.0)
+                null_gradient = model.null_latent_tokens.grad
+                if enabled:
+                    self.assertIsNotNone(null_gradient)
+                    self.assertGreater(null_gradient.abs().sum().item(), 0.0)
+                else:
+                    self.assertIsNone(null_gradient)
+
+    def test_first_recurrent_compression_consumes_null_prefix(self):
+        model = RAD(config('RAD'))
+        model.eval()
+        captured_inputs = []
+        hook = model.compression_transformer.register_forward_pre_hook(
+            lambda _module, args: captured_inputs.append(args[0].detach().clone())
+        )
+
+        model(batch())
+        hook.remove()
+
+        self.assertEqual(len(captured_inputs), 1)
+        expected_prefix = model.null_latent_tokens.expand(2, -1, -1)
+        self.assertTrue(torch.equal(captured_inputs[0][:, :3], expected_prefix))
+
     def test_ad_uses_three_tokens_and_continuous_action_loss(self):
         model = AD(config('AD'))
         tokens = model._build_token_sequence(

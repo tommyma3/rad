@@ -8,12 +8,17 @@ SPEC = importlib.util.spec_from_file_location('metaworld_optimizer_utils', ROOT 
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 build_rad_optimizer_param_groups = MODULE.build_rad_optimizer_param_groups
+build_compression_pretraining_parameters = MODULE.build_compression_pretraining_parameters
 freeze_reconstruction_decoder_for_finetuning = MODULE.freeze_reconstruction_decoder_for_finetuning
 
 
 class FakeParameter:
     def __init__(self, requires_grad=True):
         self.requires_grad = requires_grad
+
+    def requires_grad_(self, requires_grad):
+        self.requires_grad = requires_grad
+        return self
 
 
 class FakeModel:
@@ -22,6 +27,14 @@ class FakeModel:
 
     def named_parameters(self):
         return iter(self._named_parameters)
+
+    def parameters(self):
+        return iter(self._parameters)
+
+    def requires_grad_(self, requires_grad):
+        for parameter in self._parameters:
+            parameter.requires_grad = requires_grad
+        return self
 
 
 class FakeModule:
@@ -33,8 +46,38 @@ class FakeModule:
             parameter.requires_grad = requires_grad
         return self
 
+    def parameters(self):
+        return iter(self._parameters)
+
 
 class MetaWorldRADOptimizerGroupsTest(unittest.TestCase):
+    def test_null_latent_tokens_only_join_enabled_prefix_pretraining(self):
+        module_parameters = [FakeParameter() for _ in range(5)]
+        type_embedding = FakeParameter()
+        null_latent_tokens = FakeParameter()
+        model = FakeModel([])
+        (
+            model.compression_transformer,
+            model.reconstruction_decoder,
+            model.embed_state,
+            model.embed_action,
+            model.embed_reward,
+        ) = [FakeModule([parameter]) for parameter in module_parameters]
+        model.type_embedding = type_embedding
+        model.null_latent_tokens = null_latent_tokens
+        model.latent_update_mode = 'replace'
+        model._parameters = module_parameters + [type_embedding, null_latent_tokens]
+
+        model.always_use_latent_prefix = True
+        enabled = build_compression_pretraining_parameters(model)
+        model.always_use_latent_prefix = False
+        disabled = build_compression_pretraining_parameters(model)
+
+        self.assertIn(null_latent_tokens, enabled)
+        self.assertNotIn(null_latent_tokens, disabled)
+        self.assertIn(type_embedding, enabled)
+        self.assertIn(type_embedding, disabled)
+
     def test_reconstruction_decoder_is_frozen_for_finetuning(self):
         decoder_parameter = FakeParameter()
         model = FakeModel([

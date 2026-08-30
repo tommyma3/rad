@@ -310,7 +310,9 @@ class RADDataset(Dataset):
         if n_compressions == 0:
             return first_capacity
 
-        refill = max(1, self._compressed_memory_capacity() - self.short_memory_keep)
+        # The next complete S/A/R triplet crosses capacity, so the largest
+        # offline bucket with exactly this count includes the crossing step.
+        refill = max(1, self._compressed_memory_capacity() - self.short_memory_keep + 1)
         return first_capacity + n_compressions * refill
 
     def _bucket_length_for_compressions(self, n_compressions):
@@ -504,14 +506,22 @@ class CompressionPretrainDataset(Dataset):
     """
     Dataset for pre-training the compression transformer.
     
-    Samples fixed-length windows of transitions for reconstruction loss training.
-    No query states or target actions needed - just sequences to compress and reconstruct.
+    Samples fixed-compression-count histories for recurrent transition replay.
     """
     
     def __init__(self, config, traj_dir, mode='train', n_stream=None, source_timesteps=None, n_seed=None):
         self.config = config
         self.env = config['env']
-        self.window_size = config['n_transit']  # Environment timesteps to compress
+        self.n_transit = config['n_transit']
+        self.n_compress_tokens = config['n_compress_tokens']
+        self.compress_timesteps = self.n_compress_tokens // 3
+        self.always_use_latent_prefix = config.get('always_use_latent_prefix', False)
+        self.short_memory_keep = config.get('short_memory_keep', max(1, self.compress_timesteps))
+        self.pretrain_min_compressions = max(1, int(config.get('pretrain_min_compressions', 1)))
+        self.pretrain_max_compressions = max(
+            self.pretrain_min_compressions,
+            int(config.get('pretrain_max_compressions', config.get('max_gradient_rounds', 1))),
+        )
         self.dynamics = config.get('dynamics', False)
         if n_seed is None:
             n_seed = config.get('train_n_seed') if mode == 'train' else config.get('test_n_seed')
@@ -521,17 +531,47 @@ class CompressionPretrainDataset(Dataset):
         
         self.seq_length = self.states.shape[1]
         self.n_histories = self.states.shape[0]
+        self.max_bucket_context = min(config.get('max_context_length', self.seq_length), self.seq_length)
+        self.compression_buckets = [
+            count
+            for count in range(self.pretrain_min_compressions, self.pretrain_max_compressions + 1)
+            if self._context_length_for_compressions(count) <= self.max_bucket_context
+        ]
+        if not self.compression_buckets:
+            raise ValueError('No recurrent compression pretraining bucket fits the loaded trajectories')
+
+    def _first_memory_capacity(self):
+        reserved = self.compress_timesteps if self.always_use_latent_prefix else 0
+        return max(1, self.n_transit - reserved)
+
+    def _compressed_memory_capacity(self):
+        return max(1, self.n_transit - self.compress_timesteps)
+
+    def _context_length_for_compressions(self, count):
+        # Largest transition window producing exactly `count` online
+        # compressions. Replay starts with S_0, hence the final -1.
+        refill = max(1, self._compressed_memory_capacity() - self.short_memory_keep + 1)
+        return self._first_memory_capacity() + count * refill - 1
+
+    def sample_compression_bucket(self):
+        return random.choice(self.compression_buckets)
     
     def __len__(self):
-        return self.n_histories * (self.seq_length - self.window_size)
+        return self.n_histories * max(1, self.seq_length - self._context_length_for_compressions(1) + 1)
     
     def __getitem__(self, i):
+        compression_count = None
+        if isinstance(i, tuple):
+            compression_count, i = i
         history_idx = i % self.n_histories
+        if compression_count is None:
+            compression_count = self.sample_compression_bucket()
+        window_size = self._context_length_for_compressions(compression_count)
         
         # Random window start
-        max_start = self.seq_length - self.window_size
+        max_start = self.seq_length - window_size
         start_idx = random.randint(0, max_start)
-        end_idx = start_idx + self.window_size
+        end_idx = start_idx + window_size
         
         traj = {
             'states': self.states[history_idx, start_idx:end_idx],

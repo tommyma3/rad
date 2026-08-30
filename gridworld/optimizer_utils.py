@@ -3,7 +3,6 @@
 
 COMPRESSION_PARAMETER_PREFIXES = (
     'compression_transformer.',
-    'reconstruction_decoder.',
 )
 
 LATENT_PARAMETER_PREFIXES = (
@@ -28,6 +27,36 @@ def _rad_parameter_group(name):
     if name.startswith(LATENT_PARAMETER_PREFIXES):
         return 'latent'
     return 'ad'
+
+
+def freeze_reconstruction_decoder_for_finetuning(model):
+    """Keep the pretraining-only decoder out of RAD fine-tuning and DDP."""
+    model.reconstruction_decoder.requires_grad_(False)
+
+
+def build_compression_pretraining_parameters(model):
+    """Enable exactly the parameters used by recurrent reconstruction replay."""
+    model.requires_grad_(False)
+    model.compression_transformer.requires_grad_(True)
+    model.reconstruction_decoder.requires_grad_(True)
+    model.embed_state.requires_grad_(True)
+    model.embed_action.requires_grad_(True)
+    model.embed_reward.requires_grad_(True)
+    model.type_embedding.requires_grad_(True)
+    if model.always_use_latent_prefix:
+        model.null_latent_tokens.requires_grad_(True)
+
+    if model.latent_update_mode == 'residual':
+        model.latent_residual_norm.requires_grad_(True)
+    elif model.latent_update_mode == 'multiplicative_gate':
+        model.latent_multiplicative_gate.requires_grad_(True)
+    elif model.latent_update_mode == 'gru_gate':
+        model.latent_gru_gate.requires_grad_(True)
+        model.latent_gru_candidate.requires_grad_(True)
+    elif model.latent_update_mode != 'replace':
+        raise ValueError(f'Unknown latent_update_mode: {model.latent_update_mode}')
+
+    return [parameter for parameter in model.parameters() if parameter.requires_grad]
 
 
 def build_rad_optimizer_param_groups(model, config):

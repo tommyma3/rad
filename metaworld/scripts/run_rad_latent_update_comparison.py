@@ -170,7 +170,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Run RAD latent-update comparison experiments.')
     parser.add_argument('--variants', nargs='+', default=list(VARIANT_CONFIGS), choices=list(VARIANT_CONFIGS))
     parser.add_argument('--runs_root', default='./runs', help='Run directory root, relative to metaworld by default.')
-    parser.add_argument('--pretrain_config', default='rad_pretrain_ml1')
+    parser.add_argument('--pretrain_config', default='rad_ml1')
     parser.add_argument('--pretrain_run_name', default='RAD-pretrain-ml1-window-open-v3')
     parser.add_argument('--gpus', nargs='+', required=True, help='GPU indexes for variants, e.g. --gpus 0 1 2 3.')
     parser.add_argument('--pretrain_gpu', default=None, help='GPU index for shared pretraining. Defaults to the first --gpus entry.')
@@ -212,5 +212,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
