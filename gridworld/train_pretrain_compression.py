@@ -86,8 +86,10 @@ if __name__ == '__main__':
                        help='Model config name (without .yaml extension)')
     parser.add_argument('--env', type=str, default='darkroom',
                        help='Environment name: darkroom or dktd')
+    parser.add_argument('--env_split_seed', type=int, default=None,
+                       help='Override env_split_seed from environment config')
     args = parser.parse_args()
-    
+
     # Determine config files based on environment
     env_config_map = {
         'darkroom': ('darkroom', 'ppo_darkroom'),
@@ -97,11 +99,15 @@ if __name__ == '__main__':
         raise ValueError(f'Unknown environment: {args.env}')
     env_cfg, alg_cfg = env_config_map[args.env]
     model_config = args.config or {'darkroom': 'rad_dr', 'dktd': 'rad_dktd'}[args.env]
-    
+
     # Load configs
     config = get_config(f'./config/env/{env_cfg}.yaml')
     config.update(get_config(f'./config/algorithm/{alg_cfg}.yaml'))
     config.update(get_config(f'./config/model/{model_config}.yaml'))
+
+    # Override env_split_seed if provided via CLI
+    if args.env_split_seed is not None:
+        config['env_split_seed'] = args.env_split_seed
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
