@@ -148,7 +148,7 @@ if __name__ == '__main__':
     print(f'Overall mean reward: {test_rewards.mean():.4f}')
     print(f'Std deviation: {test_rewards.std():.4f}')
     if test_success is not None:
-        print(f'Final success rate: {test_success[:, -1].mean():.4f}')
+        print(f'Success rate (max per env): {test_success.max(axis=1).mean():.4f}')
 
     print('\n=== RAD Metrics ===')
     print(f'Total compressions: {total_compressions}')

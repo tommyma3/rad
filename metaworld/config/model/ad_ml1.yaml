@@ -3,13 +3,13 @@ include: config/model/ad_base.yaml
 model: AD
 
 # Transformer
-tf_n_embd: 128
+tf_n_embd: 64
 tf_n_layer: 4
 tf_n_head: 8
 tf_dropout: 0.1
 tf_attn_dropout: 0.1
-tf_n_inner: 1024
-tf_dim_feedforward: 1024
+tf_n_inner: 256
+tf_dim_feedforward: 256
 n_transit: 400  # Reduced from 1000 to avoid OOM
 
 # training
