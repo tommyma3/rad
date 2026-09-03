@@ -1,0 +1,10 @@
+env_id: MiniGrid-MemoryS13Random-v0
+controlled: false
+random_length: true
+profile_episodes: 1000
+profile_seed: 0
+profile_slack: 1.25
+eval_seed: 10000
+eval_episodes: 1000
+pilot_train_seeds: [0, 1, 2]
+final_train_seeds: [0, 1, 2, 3, 4]

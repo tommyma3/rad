@@ -1,0 +1,52 @@
+source_algorithm: recurrent_ppo
+num_actions: 7
+
+# Shared state encoder and causal transformer.
+tf_n_embd: 128
+tf_n_head: 4
+tf_n_layer: 4
+tf_dim_feedforward: 512
+tf_dropout: 0.1
+tile_embedding_dim: 16
+label_smoothing: 0.0
+
+# The sweep overrides these using the calibrated episode horizon H.
+n_transit: 64
+n_compress_tokens: 24
+short_memory_keep: 8
+max_context_length: 256
+always_use_latent_prefix: true
+compress_n_heads: 4
+compress_n_layers: 3
+latent_update_mode: gru_gate
+max_gradient_rounds: 3
+max_compressions: null
+rad_batching_strategy: compression_buckets
+
+# Distillation optimization.
+seed: 0
+lr: 0.0003
+ad_lr: 0.0003
+compression_lr: 0.0001
+latent_lr: 0.0003
+beta1: 0.9
+beta2: 0.99
+weight_decay: 0.01
+train_batch_size: 64
+train_steps: 50000
+warmup_steps: 2000
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+mixed_precision: fp16
+num_workers: 4
+dataset_stride: 8
+decision_window_repeats: 4
+
+# Compression pretraining is accounted for as extra RAD compute.
+pretrain_batch_size: 64
+pretrain_steps: 20000
+pretrain_lr: 0.0003
+pretrain_warmup_steps: 1000
+
+summary_interval: 100
+checkpoint_interval: 5000
