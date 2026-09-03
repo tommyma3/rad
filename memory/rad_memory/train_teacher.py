@@ -6,9 +6,12 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
-
 from .envs import MemoryTaskSpec, make_memory_env
+from .recurrent_ppo import (
+    RecurrentPPOConfig,
+    build_recurrent_ppo,
+    evaluate_recurrent_ppo,
+)
 
 
 def main() -> None:
@@ -30,7 +33,6 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        from sb3_contrib import RecurrentPPO
         from stable_baselines3.common.callbacks import CheckpointCallback
     except ImportError as error:
         raise RuntimeError(
@@ -59,17 +61,16 @@ def main() -> None:
         save_replay_buffer=False,
         save_vecnormalize=False,
     )
-    model = RecurrentPPO(
-        "MlpLstmPolicy",
-        env,
-        seed=args.seed,
+    ppo_config = RecurrentPPOConfig(
         n_steps=args.n_steps,
         batch_size=args.batch_size,
-        learning_rate=3e-4,
-        gamma=0.99,
-        gae_lambda=0.95,
-        ent_coef=0.01,
-        verbose=1,
+    )
+    with (run_dir / "recurrent_ppo_config.json").open("w", encoding="utf-8") as handle:
+        json.dump(ppo_config.to_dict(), handle, indent=2, sort_keys=True)
+    model = build_recurrent_ppo(
+        env,
+        seed=args.seed,
+        config=ppo_config,
         tensorboard_log=str(run_dir / "tensorboard"),
     )
     model.learn(args.total_timesteps, callback=callback, progress_bar=True)
@@ -85,37 +86,11 @@ def main() -> None:
         size=args.size,
         random_length=args.random_length,
     )
-    validation_env = make_memory_env(validation_spec, flatten_for_source=True)
-    successes = 0
-    returns = []
-    for episode in range(args.validation_episodes):
-        observation, _ = validation_env.reset(seed=args.validation_seed + episode)
-        recurrent_state = None
-        episode_start = np.ones((1,), dtype=bool)
-        episode_return = 0.0
-        while True:
-            action, recurrent_state = model.predict(
-                observation,
-                state=recurrent_state,
-                episode_start=episode_start,
-                deterministic=True,
-            )
-            observation, reward, terminated, truncated, info = validation_env.step(
-                int(np.asarray(action).item())
-            )
-            episode_return += float(reward)
-            episode_start[:] = terminated or truncated
-            if terminated or truncated:
-                successes += int(bool(info["memory_success"] and episode_return > 0))
-                returns.append(episode_return)
-                break
-    validation_env.close()
-    metrics = {
-        "episodes": args.validation_episodes,
-        "success_rate": successes / max(args.validation_episodes, 1),
-        "mean_return": sum(returns) / max(len(returns), 1),
-        "minimum_success_rate": args.minimum_success_rate,
-    }
+    metrics = evaluate_recurrent_ppo(
+        model,
+        validation_spec,
+        episodes=args.validation_episodes,
+    ) | {"minimum_success_rate": args.minimum_success_rate}
     with (run_dir / "teacher_metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2, sort_keys=True)
     if metrics["success_rate"] < args.minimum_success_rate:

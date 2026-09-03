@@ -70,6 +70,24 @@ uv run python -m rad_memory.collect \
 The collector is resumable by `(task, learner_step)`. To create a held-out
 artifact from the same teacher, add `--split test --seed 10000`.
 
+Before launching collection, check that the exact source-learner
+hyperparameters converge reliably across training seeds:
+
+```bash
+uv run python -m rad_memory.check_recurrent_ppo_convergence \
+  --env-id MiniGrid-MemoryS13Random-v0 \
+  --random-length \
+  --horizon H \
+  --seeds 0 1 2 \
+  --output-dir runs/recurrent-ppo-convergence-s13
+```
+
+The check evaluates a fixed held-out episode set every 50,000 training steps.
+It exits successfully only when every seed stays at or above 90% success for
+the final three evaluations. `summary.json` records the resolved RecurrentPPO
+configuration and every learning-curve point. Use `--save-models` if these
+verified final policies should also be retained for collection.
+
 ## 3. Inspect and run the comparison
 
 The profiler chooses a short context no larger than `0.5H` and, when needed,
