@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
+import json
 from typing import Any
 
 import gymnasium as gym
@@ -12,7 +14,7 @@ from gymnasium import spaces
 
 @dataclass(frozen=True)
 class MemoryTaskSpec:
-    """A reproducible environment stream used by collection or evaluation."""
+    """A fixed configuration, or an explicitly legacy seeded layout stream."""
 
     env_id: str
     seed: int
@@ -21,9 +23,14 @@ class MemoryTaskSpec:
     controlled: bool = False
     size: int | None = None
     random_length: bool = False
+    configuration: dict[str, Any] | None = None
 
     @property
     def task_id(self) -> str:
+        if self.configuration is not None:
+            return "fixed-" + hashlib.sha256(
+                json.dumps(self.configuration, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
         mode = "controlled" if self.controlled else "official"
         horizon = "native" if self.horizon is None else f"h{self.horizon}"
         return f"{self.split}-{mode}-{self.env_id}-{horizon}-seed{self.seed}"
@@ -108,7 +115,7 @@ class MemoryInstrumentation(gym.Wrapper):
         }
 
     def reset(self, **kwargs):
-        if "seed" not in kwargs:
+        if "seed" not in kwargs and self.task_spec.configuration is None:
             kwargs["seed"] = self.task_spec.seed + self._episode_index + 1
         observation, info = self.env.reset(**kwargs)
         self._episode_index += 1
@@ -170,7 +177,28 @@ def make_memory_env(
 
     import minigrid  # noqa: F401 - importing registers the official env IDs
 
-    if task_spec.controlled:
+    if task_spec.configuration is not None:
+        from copy import deepcopy
+        from minigrid.core.grid import Grid
+        from minigrid.envs.memory import MemoryEnv
+
+        configuration = deepcopy(task_spec.configuration)
+
+        class FixedMemoryEnv(MemoryEnv):
+            def _gen_grid(self, width, height):
+                self.grid, _ = Grid.decode(np.asarray(configuration["grid"], dtype=np.uint8))
+                self.agent_pos = np.asarray(configuration["agent_pos"], dtype=np.int64)
+                self.agent_dir = int(configuration["agent_dir"])
+                self.success_pos = tuple(configuration["success_pos"])
+                self.failure_pos = tuple(configuration["failure_pos"])
+                self.mission = configuration["mission"]
+
+        env = FixedMemoryEnv(
+            size=int(configuration["size"]),
+            max_steps=int(configuration["max_steps"]),
+            agent_view_size=int(configuration["agent_view_size"]),
+        )
+    elif task_spec.controlled:
         if task_spec.size is None:
             raise ValueError("Controlled memory tasks require an explicit size")
         env = ControlledMemoryEnv.build(

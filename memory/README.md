@@ -18,7 +18,106 @@ inference exactly; sliding windows provide supervision throughout episodes.
 The same final/decision-window oversampling is applied to every condition so
 the rare branch action is not drowned out by corridor-navigation actions.
 
-## 1. Profile the task
+## Fixed-task experiments
+
+Use this workflow for Gridworld-style algorithm distillation. A task is a saved
+initial grid, cue/branch objects, success/failure positions, agent pose, view size,
+and horizon. Every reset restores that exact state, even if the caller supplies a
+different seed. Only episode counters and other transient state restart.
+The ordinary MiniGrid action space, partial observations, rewards, and termination
+rules are retained. The random variant varies corridor length when constructing
+the pool; it does not generate arbitrary corridor topologies.
+
+Run these commands from `memory/` (examples use Bash continuation syntax):
+
+```bash
+uv run python -m rad_memory.task_pool \
+  --env-id MiniGrid-MemoryS13Random-v0 --horizon 30 \
+  --num-tasks 100 --pool-seed 0 --env-split-seed 0 --train-env-ratio 0.8 \
+  --output tasks/memory_s13_fixed.json
+
+uv run python -m rad_memory.profile_memory_task \
+  --manifest tasks/memory_s13_fixed.json --output profiles/memory-s13-fixed.json
+
+uv run python -m rad_memory.train_task_pool \
+  --manifest tasks/memory_s13_fixed.json --source-seeds 0 1 2 \
+  --total-timesteps 1000000 --evaluation-interval 50000 \
+  --evaluation-episodes 100 --minimum-success-rate 0.9 --required-consecutive-evals 3 \
+  --run-dir runs/source-fixed --output-root datasets-fixed
+
+uv run python -m rad_memory.run_context_sweep \
+  --profile profiles/memory-s13-fixed.json --manifest tasks/memory_s13_fixed.json \
+  --config config/model/memory_fixed.yaml --data-root datasets-fixed \
+  --runs-root runs/fixed-sweep --eval-episodes 20 --trials 3 --execute
+```
+
+The pool generator deduplicates full configurations before splitting. Task IDs
+are independent of split and learner seed; the manifest fingerprint binds pool
+membership and splits. It refuses to overwrite a manifest or return fewer unique
+tasks than requested. A small/controlled environment may have fewer distinct
+configurations than the requested pool size; reduce `--num-tasks` in that case.
+The profiler examines training tasks only. Horizon 30 is an example: check the
+profile before source training, and generate a new manifest if it is unsuitable.
+
+Each `(training task, source seed)` gets a fresh RecurrentPPO learner and one
+chronological interaction stream. Its network learns across episodes; its LSTM
+state resets each episode. Test tasks are never source-trained by this command.
+Histories contain the actual training actions from exploration onward, rather
+than separate rollouts of saved policies. Final incomplete episodes are omitted
+and their step count recorded. Interrupted runs remain marked incomplete; fresh
+learners cannot append to an existing run. Use a new run/data directory to retry.
+`train_teacher --manifest PATH --seed N` also invokes this fixed-task workflow
+for one source seed, using its `--checkpoint-interval` for evaluation frequency
+and `--validation-episodes` for the assigned-task evaluation count.
+
+Per-run `evaluations.json`, TensorBoard logs, checkpoints, and `result.json`, plus
+the pool run's `summary.json`, expose convergence and learning progress. The
+convergence gate evaluates the teacher on its assigned fixed task and requires
+the final consecutive evaluations to pass. The dataset rejects incomplete or
+unconverged runs. Use separate source seeds on training tasks for validation;
+held-out test tasks are reserved for final AD/RAD evaluation.
+
+`memory_fixed.yaml` selects `history_scope: task`. AD, RAD, and compression
+pretraining sample across episode boundaries within one source-learning stream.
+Termination/truncation tokens precede the next reset observation; terminal
+observations remain stored separately and are never treated as observations
+requiring another action. Episode-end queries remain represented in sampling.
+No window crosses tasks or independent source seeds. The v2 fixed-task format,
+manifest membership, and source provenance are checked before training, and
+checkpoints record the manifest fingerprint.
+
+Evaluation keeps AD history and RAD compressed memory across episodes of a test
+task, clearing it for each new task/trial. `--episodes` means episodes **per task
+per trial** in manifest mode. The sweep also evaluates with
+`--reset-context-each-episode`; results go to `eval-reset.json`. Each evaluation
+reports an adaptation curve by episode index, first-episode success, and overall
+return/success. Deterministic policy trials on an identical task repeat the same
+trajectory; use `rad_memory.evaluate --sample` for stochastic action trials, and
+multiple independently trained AD/RAD seeds for training variability.
+
+For a single trained checkpoint:
+
+```bash
+uv run python -m rad_memory.evaluate \
+  --checkpoint runs/fixed-sweep/ad-short-h30-seed0/final.pt \
+  --manifest tasks/memory_s13_fixed.json --episodes 20 --trials 3 \
+  --sample --output runs/fixed-eval.json
+```
+
+Remembering a successful route on later episodes is expected in this setting.
+Cue-gap statistics describe within-episode observations; they alone do not prove
+that a policy uses previous episodes. Use the adaptation curve and reset-context
+ablation for that comparison. Fixed-task and legacy checkpoints/artifacts cannot
+be silently mixed. Configuration paths in overrides are relative to the working
+directory; use absolute paths when launching elsewhere.
+
+## Legacy changing-layout workflow
+
+The commands below retain the original episode-bounded benchmark for existing
+experiments. `train_teacher` without `--manifest`, checkpoint `collect`, and specs without a saved
+`configuration` use changing layouts. They are not the fixed-task workflow above.
+
+### 1. Profile the task
 
 Run from this directory after dependency setup completes:
 

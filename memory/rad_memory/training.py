@@ -25,6 +25,24 @@ from .optimizer_utils import build_rad_optimizer_param_groups, freeze_reconstruc
 from .utils import latest_checkpoint, save_checkpoint_atomic, seed_everything
 
 
+def bind_manifest(config):
+    config = dict(config)
+    if config.get("history_scope", "episode") == "task":
+        from .task_pool import load_pool
+        pool = load_pool(config["task_manifest"])
+        if config.get("manifest_fingerprint", pool["fingerprint"]) != pool["fingerprint"]:
+            raise ValueError("Configured manifest fingerprint mismatch")
+        config["manifest_fingerprint"] = pool["fingerprint"]
+    return config
+
+
+def validate_checkpoint_scope(checkpoint, config):
+    saved = checkpoint["config"]
+    for key, default in (("history_scope", "episode"), ("manifest_fingerprint", None)):
+        if saved.get(key, default) != config.get(key, default):
+            raise ValueError(f"Checkpoint {key} does not match this training run")
+
+
 def make_loader(dataset, config: dict, *, batch_size_key: str, shuffle: bool) -> DataLoader:
     workers = int(config.get("num_workers", 0))
     common = {
@@ -62,6 +80,7 @@ def train_distillation(
     model_kind: str,
     pretrain_checkpoint: str | Path | None = None,
 ) -> Path:
+    config = bind_manifest(config)
     seed_everything(int(config.get("seed", 0)))
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +102,7 @@ def train_distillation(
         model = RAD(config)
         if pretrain_checkpoint is not None:
             checkpoint = torch.load(pretrain_checkpoint, map_location="cpu", weights_only=False)
+            validate_checkpoint_scope(checkpoint, config)
             missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
             allowed_missing = {
                 name for name in missing
@@ -121,6 +141,7 @@ def train_distillation(
     checkpoint_path = latest_checkpoint(run_dir)
     if checkpoint_path is not None:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        validate_checkpoint_scope(checkpoint, config)
         accelerator.unwrap_model(model).load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -197,6 +218,7 @@ def train_distillation(
 
 
 def train_compression(config: dict, data_root: str | Path, run_dir: str | Path) -> Path:
+    config = bind_manifest(config)
     seed_everything(int(config.get("seed", 0)))
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)

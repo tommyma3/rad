@@ -55,6 +55,9 @@ def build_commands(
         "--data-root", data_root,
         "--override", f"seed={seed}",
     ]
+    if evaluation.get("manifest"):
+        common.extend(["--override", "history_scope=task", "--override",
+                       f"task_manifest={evaluation['manifest']}"])
     commands: list[tuple[str, list[str]]] = []
     trained_runs: list[tuple[str, Path]] = []
     ad_conditions = (
@@ -140,13 +143,23 @@ def build_commands(
             arguments.append("--random-length")
         if evaluation.get("size") is not None:
             arguments.extend(["--size", str(evaluation["size"])])
+        if evaluation.get("manifest"):
+            arguments.extend(["--manifest", evaluation["manifest"], "--trials",
+                              str(evaluation.get("trials", 3))])
         commands.append((f"evaluate-{name}", _command("rad_memory.evaluate", arguments)))
+        if evaluation.get("manifest"):
+            reset_arguments = list(arguments)
+            reset_arguments[reset_arguments.index("--output") + 1] = str(run_dir / "eval-reset.json")
+            reset_arguments.append("--reset-context-each-episode")
+            commands.append((f"evaluate-{name}-reset", _command("rad_memory.evaluate", reset_arguments)))
     return commands
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the MiniGrid Memory context sweep")
     parser.add_argument("--profile", required=True)
+    parser.add_argument("--manifest")
+    parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--config", required=True)
     parser.add_argument("--data-root", default="datasets")
     parser.add_argument("--runs-root", default="runs/context-sweep")
@@ -159,6 +172,11 @@ def main() -> None:
     args = parser.parse_args()
     with Path(args.profile).open("r", encoding="utf-8") as handle:
         profile = json.load(handle)
+    if args.manifest:
+        from .task_pool import load_pool
+        pool = load_pool(args.manifest)
+        if profile.get("manifest_fingerprint") != pool["fingerprint"]:
+            raise ValueError("Profile and task manifest do not match")
     horizon = int(profile["recommended_horizon"])
     short_context = int(profile["short_context"])
     profile_spec = profile["task_spec"]
@@ -167,6 +185,8 @@ def main() -> None:
     base_config = load_config(args.config)
     compute_matched_steps = int(base_config["train_steps"]) + int(base_config["pretrain_steps"])
     evaluation = {
+        "manifest": args.manifest,
+        "trials": args.trials,
         "env_id": profile_spec["env_id"],
         "controlled": profile_spec.get("controlled", False),
         "random_length": profile_spec.get("random_length", False),

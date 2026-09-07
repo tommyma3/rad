@@ -6,6 +6,19 @@ from rad_memory.run_context_sweep import build_commands
 
 
 class SweepMatrixTest(unittest.TestCase):
+    def test_fixed_sweep_binds_manifest_and_separates_reset_ablation(self):
+        commands = dict(build_commands(
+            horizon=30, short_context=8, seed=0, config="fixed.yaml", data_root="data", runs_root="runs",
+            evaluation={"env_id": "MiniGrid-MemoryS13Random-v0", "seed": 0, "episodes": 20,
+                        "manifest": "tasks.json", "trials": 2}, compute_matched_steps=70000))
+        self.assertIn("task_manifest=tasks.json", commands["ad-short"])
+        self.assertIn("history_scope=task", commands["rad-pretrain"])
+        evaluate = commands["evaluate-ad-short"]
+        reset = commands["evaluate-ad-short-reset"]
+        self.assertEqual(evaluate[evaluate.index("--manifest") + 1], "tasks.json")
+        self.assertIn("--reset-context-each-episode", reset)
+        self.assertNotEqual(evaluate[evaluate.index("--output") + 1], reset[reset.index("--output") + 1])
+
     def test_requested_context_conditions_and_dependencies_are_present(self):
         commands = build_commands(
             horizon=100,

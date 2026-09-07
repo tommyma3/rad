@@ -92,6 +92,8 @@ def main() -> None:
 
     with Path(args.task_spec).open("r", encoding="utf-8") as handle:
         spec = MemoryTaskSpec.from_dict(json.load(handle))
+    if spec.configuration is not None:
+        raise ValueError("Fixed tasks require online histories: use rad_memory.train_task_pool")
     if args.split is not None or args.seed is not None:
         spec = MemoryTaskSpec(
             env_id=spec.env_id,

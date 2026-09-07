@@ -23,6 +23,12 @@ def _train_seed(run_name: str) -> int:
     return int(match.group(1))
 
 
+def _record_key(record):
+    if "trial" in record:
+        return (int(record["train_seed"]), record["task_id"], int(record["trial"]), int(record["episode"]))
+    return (int(record["train_seed"]), int(record["seed"]))
+
+
 def _bootstrap(values: np.ndarray, rng: np.random.Generator, samples: int = 10000):
     if not len(values):
         return None, None
@@ -52,7 +58,7 @@ def main() -> None:
         runs.append(
             {
                 "run": path.parent.name,
-                "condition": _condition(path.parent.name),
+                "condition": _condition(path.parent.name) + ("-reset" if summary.get("reset_context_each_episode") else ""),
                 "train_seed": train_seed,
                 "model": summary["model"],
                 "n_transit": summary["n_transit"],
@@ -71,7 +77,7 @@ def main() -> None:
     for run in runs:
         by_condition.setdefault(run["condition"], []).extend(run["records"])
     baseline_by_seed = {
-        (int(record["train_seed"]), int(record["seed"])): float(record["success"])
+        _record_key(record): float(record["success"])
         for record in by_condition.get("ad-short", [])
     }
     rows = []
@@ -102,10 +108,10 @@ def main() -> None:
         for train_seed in train_seeds:
             differences = [
                 float(record["success"])
-                - baseline_by_seed[(int(record["train_seed"]), int(record["seed"]))]
+                - baseline_by_seed[_record_key(record)]
                 for record in records
                 if int(record["train_seed"]) == train_seed
-                and (int(record["train_seed"]), int(record["seed"])) in baseline_by_seed
+                and _record_key(record) in baseline_by_seed
             ]
             if differences:
                 paired_by_train_seed.append(float(np.mean(differences)))

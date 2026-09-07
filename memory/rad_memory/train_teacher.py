@@ -16,6 +16,9 @@ from .recurrent_ppo import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RecurrentPPO on MiniGrid Memory")
+    parser.add_argument("--manifest", help="Train independent fixed-task learners with online histories")
+    parser.add_argument("--output-root", default="datasets-fixed")
+    parser.add_argument("--required-consecutive-evals", type=int, default=3)
     parser.add_argument("--env-id", default="MiniGrid-MemoryS13Random-v0")
     parser.add_argument("--size", type=int)
     parser.add_argument("--controlled", action="store_true")
@@ -31,6 +34,14 @@ def main() -> None:
     parser.add_argument("--validation-episodes", type=int, default=200)
     parser.add_argument("--minimum-success-rate", type=float, default=0.9)
     args = parser.parse_args()
+    if args.manifest:
+        from .train_task_pool import train_pool
+        train_pool(args.manifest, [args.seed], args.run_dir, args.output_root,
+                   total_timesteps=args.total_timesteps, evaluation_interval=args.checkpoint_interval,
+                   evaluation_episodes=args.validation_episodes, minimum_success_rate=args.minimum_success_rate,
+                   required_consecutive_evals=args.required_consecutive_evals,
+                   ppo_config=RecurrentPPOConfig(n_steps=args.n_steps, batch_size=args.batch_size))
+        return
 
     try:
         from stable_baselines3.common.callbacks import CheckpointCallback

@@ -14,6 +14,7 @@ from .envs import MemoryTaskSpec, numeric_observation
 
 
 TRAJECTORY_FORMAT = "rad-minigrid-memory-v1"
+FIXED_TRAJECTORY_FORMAT = "rad-minigrid-memory-v2-fixed"
 
 
 def _as_array(steps: list[dict[str, Any]], key: str, dtype=None) -> np.ndarray:
@@ -35,11 +36,17 @@ class TaskHistoryWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.task_spec = task_spec
         self.source_algorithm = source_algorithm
+        self.source_config = source_config or {}
+        self.format = FIXED_TRAJECTORY_FORMAT if task_spec.configuration is not None else TRAJECTORY_FORMAT
         self.handle = h5py.File(self.path, "a", libver="latest")
         if "format" in self.handle.attrs:
-            self._validate_existing()
+            try:
+                self._validate_existing()
+            except Exception:
+                self.handle.close()
+                raise
         else:
-            self.handle.attrs["format"] = TRAJECTORY_FORMAT
+            self.handle.attrs["format"] = self.format
             self.handle.attrs["task_spec"] = json.dumps(task_spec.to_dict(), sort_keys=True)
             self.handle.attrs["source_algorithm"] = source_algorithm
             self.handle.attrs["source_config"] = json.dumps(source_config or {}, sort_keys=True)
@@ -47,13 +54,16 @@ class TaskHistoryWriter:
         self.episodes = self.handle.require_group("episodes")
 
     def _validate_existing(self) -> None:
-        if self.handle.attrs["format"] != TRAJECTORY_FORMAT:
+        if self.handle.attrs["format"] != self.format:
             raise ValueError(f"Unsupported trajectory format in {self.path}")
         stored_spec = json.loads(self.handle.attrs["task_spec"])
-        if stored_spec["task_id"] != self.task_spec.task_id:
+        normalized_spec = MemoryTaskSpec.from_dict(stored_spec).to_dict()
+        if stored_spec["task_id"] != normalized_spec["task_id"] or normalized_spec != self.task_spec.to_dict():
             raise ValueError(f"Task mismatch while resuming {self.path}")
         if self.handle.attrs["source_algorithm"] != self.source_algorithm:
             raise ValueError(f"Source-algorithm mismatch while resuming {self.path}")
+        if json.loads(self.handle.attrs["source_config"]) != self.source_config:
+            raise ValueError(f"Source-run mismatch while resuming {self.path}")
 
     @property
     def next_episode_index(self) -> int:
@@ -99,7 +109,7 @@ class TaskHistoryWriter:
         group.create_dataset("success", data=_as_array(steps, "success", np.bool_))
         group.create_dataset(
             "learner_steps",
-            data=np.full(len(steps), int(learner_step), dtype=np.int64),
+            data=np.asarray([step.get("learner_step", learner_step) for step in steps], dtype=np.int64),
         )
         group.attrs["length"] = len(steps)
         group.attrs["learner_step"] = int(learner_step)

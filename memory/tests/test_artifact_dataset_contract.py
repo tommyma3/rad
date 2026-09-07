@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+import json
+
+import h5py
 
 import numpy as np
 
@@ -40,6 +43,19 @@ def _episode(length: int) -> list[dict]:
 
 
 class ArtifactDatasetContractTest(unittest.TestCase):
+    def test_legacy_spec_without_configuration_field_can_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.hdf5"
+            spec = MemoryTaskSpec("MiniGrid-MemoryS7-v0", 0, "train", horizon=8)
+            with TaskHistoryWriter(path, spec, "recurrent_ppo") as writer:
+                writer.write_episode(_episode(5))
+            with h5py.File(path, "a") as handle:
+                saved = json.loads(handle.attrs["task_spec"])
+                saved.pop("configuration")
+                handle.attrs["task_spec"] = json.dumps(saved)
+            with TaskHistoryWriter(path, spec, "recurrent_ppo") as writer:
+                self.assertEqual(writer.next_episode_index, 1)
+
     def _write(self, root: Path) -> None:
         spec = MemoryTaskSpec("MiniGrid-MemoryS13-v0", 3, "train", horizon=8)
         path = root / "train" / "recurrent_ppo" / f"{spec.task_id}.hdf5"

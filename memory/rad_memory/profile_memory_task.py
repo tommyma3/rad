@@ -104,6 +104,7 @@ def profile_episode(spec: MemoryTaskSpec, seed: int) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Profile MiniGrid Memory dependency lengths")
     parser.add_argument("--env-id", default="MiniGrid-MemoryS13Random-v0")
+    parser.add_argument("--manifest", help="Profile only the training tasks of a fixed pool")
     parser.add_argument("--size", type=int)
     parser.add_argument("--controlled", action="store_true")
     parser.add_argument("--random-length", action="store_true")
@@ -122,7 +123,15 @@ def main() -> None:
         size=args.size,
         random_length=args.random_length,
     )
-    episodes = [profile_episode(spec, args.seed + index) for index in range(args.episodes)]
+    pool = None
+    if args.manifest:
+        from .task_pool import load_pool
+        pool = load_pool(args.manifest)
+        specs = [MemoryTaskSpec.from_dict(t) for t in pool["tasks"] if t["split"] == "train"]
+        episodes = [dict(profile_episode(t, t.seed), task_id=t.task_id) for t in specs]
+        spec = specs[0]
+    else:
+        episodes = [profile_episode(spec, args.seed + index) for index in range(args.episodes)]
     if not all(item["success"] for item in episodes):
         raise RuntimeError("Privileged profiler failed at least one task; inspect its route planner")
     lengths = sorted(item["length"] for item in episodes)
@@ -134,6 +143,7 @@ def main() -> None:
         max(1, int(math.floor(0.75 * median_gap))),
     )
     summary = {
+        "manifest_fingerprint": None if pool is None else pool["fingerprint"],
         "task_spec": spec.to_dict(),
         "episodes": len(episodes),
         "max_episode_length": max(lengths),
@@ -141,7 +151,7 @@ def main() -> None:
         "max_cue_to_decision": max(gaps),
         "median_cue_to_decision": median_gap,
         "p95_cue_to_decision": gaps[int(0.95 * (len(gaps) - 1))],
-        "recommended_horizon": recommendation,
+        "recommended_horizon": recommendation if pool is None else int(spec.configuration["max_steps"]),
         "short_context": short_context,
         "short_context_ratio": short_context / recommendation,
         "fraction_cue_gap_outside_short_context": sum(gap >= short_context for gap in gaps) / len(gaps),
