@@ -38,7 +38,8 @@ def bind_manifest(config):
 
 def validate_checkpoint_scope(checkpoint, config):
     saved = checkpoint["config"]
-    for key, default in (("history_scope", "episode"), ("manifest_fingerprint", None)):
+    for key, default in (("history_scope", "episode"), ("manifest_fingerprint", None),
+                         ("source_algorithm", "recurrent_ppo")):
         if saved.get(key, default) != config.get(key, default):
             raise ValueError(f"Checkpoint {key} does not match this training run")
 

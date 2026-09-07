@@ -41,13 +41,14 @@ uv run python -m rad_memory.profile_memory_task \
 
 uv run python -m rad_memory.train_task_pool \
   --manifest tasks/memory_s13_fixed.json --source-seeds 0 1 2 \
+  --source-algorithm ppo --workers 4 --torch-threads 1 --device cpu \
   --total-timesteps 1000000 --evaluation-interval 50000 \
   --evaluation-episodes 100 --minimum-success-rate 0.9 --required-consecutive-evals 3 \
   --run-dir runs/source-fixed --output-root datasets-fixed
 
 uv run python -m rad_memory.run_context_sweep \
   --profile profiles/memory-s13-fixed.json --manifest tasks/memory_s13_fixed.json \
-  --config config/model/memory_fixed.yaml --data-root datasets-fixed \
+  --config config/model/memory_fixed_ppo.yaml --data-root datasets-fixed \
   --runs-root runs/fixed-sweep --eval-episodes 20 --trials 3 --execute
 ```
 
@@ -59,9 +60,9 @@ configurations than the requested pool size; reduce `--num-tasks` in that case.
 The profiler examines training tasks only. Horizon 30 is an example: check the
 profile before source training, and generate a new manifest if it is unsuitable.
 
-Each `(training task, source seed)` gets a fresh RecurrentPPO learner and one
+Each `(training task, source seed)` gets a fresh learner and one
 chronological interaction stream. Its network learns across episodes; its LSTM
-state resets each episode. Test tasks are never source-trained by this command.
+state resets each episode when using RecurrentPPO. Test tasks are never source-trained by this command.
 Histories contain the actual training actions from exploration onward, rather
 than separate rollouts of saved policies. Final incomplete episodes are omitted
 and their step count recorded. Interrupted runs remain marked incomplete; fresh
@@ -69,6 +70,21 @@ learners cannot append to an existing run. Use a new run/data directory to retry
 `train_teacher --manifest PATH --seed N` also invokes this fixed-task workflow
 for one source seed, using its `--checkpoint-interval` for evaluation frequency
 and `--validation-episodes` for the assigned-task evaluation count.
+
+Fixed-task CLIs default to standard PPO (`MlpPolicy`): no LSTM, frame stacking,
+privileged state, or observation changes. It uses CPU by default and one Torch
+thread per worker. `--workers N` runs independent task/seed jobs in separate spawned
+processes, each with its own optimizer and history file. `--device` can override
+placement. Fixed configurations can make a reactive policy sufficient, but do not
+guarantee convergence on every partially observed task; the convergence gate still
+applies. Use `--source-algorithm recurrent_ppo` for the previous recurrent learner.
+
+PPO histories live under `train/ppo/`; recurrent histories use
+`train/recurrent_ppo/`. Select `memory_fixed_ppo.yaml` for PPO distillation and
+`memory_fixed.yaml` for recurrent histories, or override `source_algorithm`.
+Run IDs distinguish the algorithms. Use separate source run directories to keep
+each pool's aggregate `summary.json` separate. Checkpoints, metadata, per-run
+evaluation curves, and the same consecutive-success gate are written for both.
 
 Per-run `evaluations.json`, TensorBoard logs, checkpoints, and `result.json`, plus
 the pool run's `summary.json`, expose convergence and learning progress. The

@@ -1,4 +1,4 @@
-"""Train a recurrent PPO source learner and save learning checkpoints."""
+"""Train fixed-task PPO/RecurrentPPO or the legacy recurrent layout-stream learner."""
 
 from __future__ import annotations
 
@@ -15,8 +15,12 @@ from .recurrent_ppo import (
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train RecurrentPPO on MiniGrid Memory")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", help="Train independent fixed-task learners with online histories")
+    parser.add_argument("--source-algorithm", choices=("ppo", "recurrent_ppo"), default=None)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--torch-threads", type=int, default=1)
+    parser.add_argument("--device", default=None)
     parser.add_argument("--output-root", default="datasets-fixed")
     parser.add_argument("--required-consecutive-evals", type=int, default=3)
     parser.add_argument("--env-id", default="MiniGrid-MemoryS13Random-v0")
@@ -36,12 +40,19 @@ def main() -> None:
     args = parser.parse_args()
     if args.manifest:
         from .train_task_pool import train_pool
+        from .ppo import PPOConfig
+        algorithm = args.source_algorithm or "ppo"
+        config_type = PPOConfig if algorithm == "ppo" else RecurrentPPOConfig
         train_pool(args.manifest, [args.seed], args.run_dir, args.output_root,
+                   source_algorithm=algorithm, workers=args.workers,
+                   torch_threads=args.torch_threads, device=args.device,
                    total_timesteps=args.total_timesteps, evaluation_interval=args.checkpoint_interval,
                    evaluation_episodes=args.validation_episodes, minimum_success_rate=args.minimum_success_rate,
                    required_consecutive_evals=args.required_consecutive_evals,
-                   ppo_config=RecurrentPPOConfig(n_steps=args.n_steps, batch_size=args.batch_size))
+                   ppo_config=config_type(n_steps=args.n_steps, batch_size=args.batch_size))
         return
+    if args.source_algorithm == "ppo":
+        parser.error("Feed-forward PPO requires --manifest for fixed-task training")
 
     try:
         from stable_baselines3.common.callbacks import CheckpointCallback
@@ -83,6 +94,7 @@ def main() -> None:
         seed=args.seed,
         config=ppo_config,
         tensorboard_log=str(run_dir / "tensorboard"),
+        device=args.device or "auto",
     )
     model.learn(args.total_timesteps, callback=callback, progress_bar=True)
     model.save(run_dir / "teacher-final")

@@ -39,6 +39,7 @@ def build_recurrent_ppo(
     config: RecurrentPPOConfig,
     tensorboard_log: str | Path | None,
     verbose: int = 1,
+    device: str = "auto",
 ):
     """Build the exact RecurrentPPO learner used by teacher training."""
 
@@ -65,6 +66,7 @@ def build_recurrent_ppo(
         max_grad_norm=config.max_grad_norm,
         normalize_advantage=config.normalize_advantage,
         verbose=verbose,
+        device=device,
         tensorboard_log=None if tensorboard_log is None else str(tensorboard_log),
     )
 
