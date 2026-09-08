@@ -454,7 +454,7 @@ def plot_environment(
 
         episodes, mean, std = summarize_rewards(rewards, window)
         color = METHOD_COLORS[method]
-        label = f'{METHOD_LABELS[method]} (n={rewards.shape[0]})'
+        label = f'{METHOD_LABELS[method]}'
         lower = np.maximum(mean - std, 0.0)
         upper = mean + std
         max_upper = max(max_upper, float(np.nanmax(upper)))
