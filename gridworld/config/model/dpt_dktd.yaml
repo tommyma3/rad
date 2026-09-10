@@ -1,0 +1,7 @@
+include: config/model/ad_dktd.yaml
+model: DPT
+collection_env_split_seed: 2
+baseline_tokenization: gridworld-dpt-gpt2-v1
+n_transit: 100
+torch_compile: False
+mixed_precision: 'no'

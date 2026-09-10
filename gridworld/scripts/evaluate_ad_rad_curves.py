@@ -1,5 +1,5 @@
 """
-Evaluate AD and RAD gridworld checkpoints and plot reward curves.
+Evaluate RAD, AD, DPT, IDT and plot them alongside source RL learning curves.
 
 Examples:
     uv run python scripts/evaluate_ad_rad_curves.py --dry-run
@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import random
 import re
 import sys
@@ -25,6 +27,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import h5py
 import torch
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -34,8 +37,9 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from env import SAMPLE_ENVIRONMENT, make_env
+from baseline_dataset import selected_group_ids
 from model import MODEL
-from utils import normalize_compiled_state_dict
+from utils import get_traj_file_name, normalize_compiled_state_dict
 
 
 ENV_LABELS = {
@@ -46,11 +50,17 @@ ENV_LABELS = {
 METHOD_LABELS = {
     "AD": "AD",
     "RAD": "RAD",
+    "DPT": "DPT",
+    "IDT": "IDT",
+    "SOURCE": "Source RL (training)",
 }
 
 METHOD_COLORS = {
     "AD": "#0072B2",
     "RAD": "#D55E00",
+    "DPT": "#009E73",
+    "IDT": "#CC79A7",
+    "SOURCE": "#666666",
 }
 
 
@@ -68,14 +78,18 @@ class CheckpointSpec:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate all AD checkpoints and RAD best checkpoints for darkroom "
-            "and dktd, then plot average rewards with standard deviation."
+            "Evaluate AD/DPT/IDT checkpoints and RAD best checkpoints, then plot "
+            "episode rewards alongside source RL training histories."
         )
     )
     parser.add_argument("--runs-root", default="./runs", help="Run directory root, relative to gridworld_test.")
     parser.add_argument("--output-dir", default="./runs/eval_curves", help="Output directory.")
     parser.add_argument("--envs", nargs="+", default=["darkroom", "dktd"], choices=["darkroom", "dktd"])
-    parser.add_argument("--methods", nargs="+", default=["AD", "RAD"], choices=["AD", "RAD"])
+    parser.add_argument("--methods", nargs="+", default=["RAD", "AD", "DPT", "IDT", "SOURCE"], choices=list(METHOD_LABELS))
+    parser.add_argument("--source-history", action="append", default=[], metavar="ENV=PATH",
+                        help="Override source HDF5 path per environment; otherwise use checkpoint config and --datasets-root")
+    parser.add_argument("--datasets-root", default="./datasets")
+    parser.add_argument("--collection-env-split-seed", type=int, help="Seed used by collect.py to number source tasks")
     parser.add_argument("--train-seeds", nargs="+", type=int, default=None, help="Train seeds to include.")
     parser.add_argument("--eval-seeds", nargs="+", type=int, default=None, help="Eval seeds. Defaults to 0..19.")
     parser.add_argument("--num-eval-seeds", type=int, default=20, help="Used when --eval-seeds is omitted.")
@@ -205,14 +219,15 @@ def load_model(ckpt_path: Path, device: torch.device):
     return model, config, checkpoint
 
 
-def cache_path_for(output_dir: Path, spec: CheckpointSpec, eval_seed: int) -> Path:
+def cache_path_for(output_dir: Path, spec: CheckpointSpec, eval_seed: int, protocol: str = "") -> Path:
+    identity = hashlib.sha256(f'{spec.ckpt_path.resolve()}|{protocol}'.encode()).hexdigest()[:12]
     return (
         output_dir
         / "cache"
         / spec.env
         / spec.method
         / f"train_seed{spec.train_seed}"
-        / f"{spec.ckpt_label}_eval_seed{eval_seed}.npz"
+        / f"{spec.ckpt_label}_{identity}_eval_seed{eval_seed}.npz"
     )
 
 
@@ -231,8 +246,11 @@ def evaluate_checkpoint(
     checkpoint = None
     rows = []
 
+    stat = spec.ckpt_path.stat()
+    protocol = json.dumps([2, stat.st_mtime_ns, stat.st_size, eval_episodes, eval_timesteps_override, sample])
+
     for eval_seed in eval_seeds:
-        result_path = cache_path_for(output_dir, spec, eval_seed)
+        result_path = cache_path_for(output_dir, spec, eval_seed, protocol)
         if result_path.exists() and not force:
             cached = np.load(result_path, allow_pickle=False)
             rows.append(
@@ -303,6 +321,62 @@ def evaluate_checkpoint(
             }
         )
 
+    return rows
+
+
+def source_history_rows(specs, overrides, datasets_root, output_dir, eval_episodes,
+                        eval_timesteps=None, collection_seed=None):
+    """Read true PPO training rewards for the tasks used by build_eval_envs.
+
+    collect.py stores sequential group IDs in shuffled task order. Invert that
+    order to find evaluation tasks; a group ID is not a coordinate encoding.
+    Each stream is one source learner trajectory, not a new evaluation seed.
+    """
+    rows, seen = [], set()
+    for spec in specs:
+        checkpoint = torch.load(spec.ckpt_path, map_location='cpu', weights_only=False)
+        config = checkpoint['config']
+        path = overrides.get(spec.env, datasets_root / f'{get_traj_file_name(config)}.hdf5')
+        split_seed = config['env_split_seed']
+        source_seed = collection_seed if collection_seed is not None else config.get('collection_env_split_seed', split_seed)
+        horizon = int(config['horizon'])
+        episode_limit = eval_episodes if eval_timesteps is None else eval_timesteps // horizon
+        if episode_limit < 1:
+            raise ValueError('Evaluation must cover at least one complete episode')
+        groups = selected_group_ids({**config, 'collection_env_split_seed': source_seed}, 'test')
+        identity = (str(path.resolve()), tuple(groups), horizon, episode_limit, config['alg'])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if not path.exists():
+            raise FileNotFoundError(f'Source history missing: {path}. Set --source-history {spec.env}=PATH or omit SOURCE from --methods.')
+        trials = []
+        with h5py.File(path, 'r') as history:
+            for group_id in groups:
+                if str(group_id) not in history:
+                    raise ValueError(f'{path}: missing held-out task group {group_id}; collect all evaluation tasks')
+                group = history[str(group_id)]
+                reward = np.asarray(group['rewards'][:episode_limit * horizon], dtype=float)
+                count = reward.shape[0] // horizon
+                if count < 1:
+                    raise ValueError(f'{path}: group {group_id} has no complete episodes')
+                if 'dones' in group:
+                    done = group['dones'][:count * horizon].astype(bool)
+                    expected = np.broadcast_to((np.arange(count * horizon) % horizon == horizon - 1)[:, None], done.shape)
+                    if not np.array_equal(done, expected):
+                        raise ValueError(f'{path}: episode boundaries disagree with checkpoint horizon={horizon}')
+                trials.append(reward[:count * horizon].reshape(count, horizon, -1).sum(1).T)
+        count = min(trial.shape[1] for trial in trials)
+        rewards = np.concatenate([trial[:, :count] for trial in trials], 0)
+        digest = hashlib.sha256(repr(identity).encode()).hexdigest()[:12]
+        cache_path = output_dir / 'cache' / spec.env / 'SOURCE' / f'{digest}.npz'
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(cache_path, reward_episode=rewards, group_ids=groups, history_path=str(path))
+        rows.append(dict(env=spec.env, method='SOURCE', checkpoint='source-history', train_seed=split_seed,
+                         eval_seed=int(config.get('alg_seed', 0)), step=0, reward_mean=float(rewards.mean()),
+                         reward_std_over_env_episodes=float(rewards.std()), num_test_envs=len(groups),
+                         num_eval_episodes=count, ckpt_path=str(path), cache_path=str(cache_path),
+                         source_algorithm=config['alg']))
     return rows
 
 
@@ -396,7 +470,16 @@ def moving_average(values: np.ndarray, window: int) -> np.ndarray:
 def load_plot_rewards(rows: list[dict], env: str, method: str) -> np.ndarray | None:
     trials = []
     episode_count = None
-    for row in rows:
+    relevant = [row for row in rows if row['env'] == env and row['method'] == method]
+    # Different training checkpoints are not independent evaluation trials.
+    # Retain all in CSV, but draw the latest checkpoint from each training run.
+    latest = {}
+    for row in relevant:
+        run = str(Path(row['ckpt_path']).parent)
+        latest[run] = max(latest.get(run, -1), row['step'])
+    for row in relevant:
+        if row['step'] != latest[str(Path(row['ckpt_path']).parent)]:
+            continue
         if row['env'] != env or row['method'] != method:
             continue
         cache_path = Path(row['cache_path'])
@@ -407,9 +490,17 @@ def load_plot_rewards(rows: list[dict], env: str, method: str) -> np.ndarray | N
         elif rewards.ndim != 2:
             raise ValueError(f'{cache_path} reward_episode must be 1D or 2D, got {rewards.shape}.')
 
+        if rewards.shape[1] == 0:
+            raise ValueError(f'{cache_path}: no completed evaluation episodes')
         if episode_count is None:
             episode_count = rewards.shape[1]
         elif rewards.shape[1] != episode_count:
+            if method == 'SOURCE':
+                episode_count = min(episode_count, rewards.shape[1])
+                trials = [trial[:, :episode_count] for trial in trials]
+                rewards = rewards[:, :episode_count]
+                trials.append(rewards)
+                continue
             raise ValueError(
                 f'Episode count mismatch for {method} on {env}: {cache_path} has '
                 f'{rewards.shape[1]} episodes, expected {episode_count}.'
@@ -447,19 +538,24 @@ def plot_environment(
     saved_paths = []
     plotted = False
 
-    for method in ('AD', 'RAD'):
+    max_episodes = 1
+    for method in ('RAD', 'AD', 'DPT', 'IDT', 'SOURCE'):
         rewards = load_plot_rewards(detail_rows, env, method)
         if rewards is None:
             continue
 
         episodes, mean, std = summarize_rewards(rewards, window)
+        max_episodes = max(max_episodes, int(episodes[-1]))
         color = METHOD_COLORS[method]
         label = f'{METHOD_LABELS[method]}'
+        if method == 'SOURCE':
+            algorithms = sorted({row.get('source_algorithm', 'RL') for row in detail_rows if row['env'] == env and row['method'] == method})
+            label = f"Source {'/'.join(algorithms)} (training)"
         lower = np.maximum(mean - std, 0.0)
         upper = mean + std
         max_upper = max(max_upper, float(np.nanmax(upper)))
 
-        ax.plot(episodes, mean, color=color, label=label)
+        ax.plot(episodes, mean, color=color, label=label, linestyle='--' if method == 'SOURCE' else '-')
         ax.fill_between(episodes, lower, upper, color=color, alpha=0.18, linewidth=0.0)
         plotted = True
 
@@ -469,9 +565,9 @@ def plot_environment(
 
     env_label = ENV_LABELS[env]
     ax.set_title(f'{env_label} Evaluation Performance')
-    ax.set_xlabel('Evaluation episode')
+    ax.set_xlabel('Episode (in-context evaluation / source RL training)')
     ax.set_ylabel('Average episode reward')
-    ax.set_xlim(1, episodes[-1])
+    ax.set_xlim(1, max(2, max_episodes))
     ax.set_ylim(0, max_upper * 1.08 if max_upper > 0 else 1)
     ax.legend(frameon=False, loc='best')
     ax.margins(x=0.01)
@@ -510,6 +606,8 @@ def main() -> None:
     specs = discover_checkpoints(runs_root, args.envs, args.methods, train_seeds)
     print_discovery(specs, eval_seeds)
     if args.dry_run:
+        if 'SOURCE' in args.methods:
+            print('Source RL: read held-out task learning histories from checkpoint configs; overrides:', args.source_history)
         return
     if not specs:
         raise RuntimeError(f"No checkpoints found under {runs_root}")
@@ -539,6 +637,16 @@ def main() -> None:
             )
         )
 
+    if 'SOURCE' in args.methods:
+        overrides = {}
+        for item in args.source_history:
+            env, separator, raw_path = item.partition('=')
+            if not separator or env not in ENV_LABELS:
+                raise ValueError('--source-history must be darkroom=PATH or dktd=PATH')
+            overrides[env] = resolve_project_path(raw_path)
+        rows.extend(source_history_rows(specs, overrides, resolve_project_path(args.datasets_root), output_dir,
+                                        args.eval_episodes, args.eval_timesteps, args.collection_env_split_seed))
+
     detail_fields = [
         "env",
         "method",
@@ -552,6 +660,7 @@ def main() -> None:
         "num_eval_episodes",
         "ckpt_path",
         "cache_path",
+        "source_algorithm",
     ]
     write_csv(output_dir / "detail.csv", rows, detail_fields)
 

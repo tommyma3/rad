@@ -1,0 +1,9 @@
+include: config/model/ad_dr.yaml
+model: IDT
+collection_env_split_seed: 0
+baseline_tokenization: gridworld-idt-gpt2-v1
+n_transit: 80
+low_per_high: 10
+dim_z: 8
+torch_compile: False
+mixed_precision: 'no'

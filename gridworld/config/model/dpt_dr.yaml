@@ -1,0 +1,8 @@
+include: config/model/ad_dr.yaml
+model: DPT
+collection_env_split_seed: 0
+baseline_tokenization: gridworld-dpt-gpt2-v1
+# One query plus 79 packed transitions, following the reference convention.
+n_transit: 80
+torch_compile: False
+mixed_precision: 'no'
