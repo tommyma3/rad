@@ -9,6 +9,7 @@ from statistics import mean
 
 import torch
 
+from .effective_length import configured_effective_length
 from .envs import MemoryTaskSpec, make_memory_env
 from .model import MODEL
 
@@ -33,6 +34,7 @@ def evaluate_checkpoint(
         raise ValueError("Checkpoint history scope does not match evaluation task mode")
     model = MODEL[config["model"]](config)
     model.load_state_dict(checkpoint["model"])
+    effective_length = configured_effective_length(config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
     env = make_memory_env(spec)
@@ -53,13 +55,14 @@ def evaluate_checkpoint(
             # terminal reward/done tokens, without inserting an unacted terminal state.
             if done:
                 reset_observation, reset_info = env.reset(seed=spec.seed + episode_index + 1)
+            boundary_observation = reset_observation if done else next_observation
             model.observe(
                 context,
                 action,
                 reward,
                 terminated,
                 truncated,
-                reset_observation if done else next_observation,
+                boundary_observation,
             )
             total_reward += float(reward)
             if info["memory_cue_visible"]:
@@ -68,6 +71,11 @@ def evaluate_checkpoint(
                 break
             observation = next_observation
         length = int(info["memory_step"])
+        if effective_length is not None and length < effective_length:
+            # Post-terminal no-op filler, mirroring the training-time padding: every
+            # episode occupies exactly the effective length in the model's context.
+            for _ in range(effective_length - length):
+                model.observe(context, 0, 0.0, True, False, boundary_observation)
         cue_gap = None if last_cue_step is None else length - last_cue_step
         active_context = int(config["n_transit"])
         records.append(

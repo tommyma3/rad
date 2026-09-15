@@ -16,6 +16,7 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 from .artifacts import TRAJECTORY_FORMAT, FIXED_TRAJECTORY_FORMAT
+from .effective_length import configured_effective_length, pad_transition_tail
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,7 @@ class ADDataset(Dataset):
         self.decision_window_repeats = int(config.get("decision_window_repeats", 1))
         if self.decision_window_repeats < 1:
             raise ValueError("decision_window_repeats must be at least one")
+        self.effective_episode_length = configured_effective_length(config)
         manifest_hash = config.get("manifest_fingerprint")
         allowed = None
         if config.get("history_scope", "episode") == "task":
@@ -212,17 +214,32 @@ class ADDataset(Dataset):
                 part_key, length = episode.parts[part_index]
                 low, high = max(0, start - offset), min(length, end - offset)
                 if low < high:
-                    slices.append((groups[part_key], low, high))
+                    slices.append((groups[part_key], low, high, length))
                 offset += length
                 if offset >= end:
                     break
-            item = {key: np.concatenate([group[key][low:high] for group, low, high in slices])
-                    for key in keys}
+            parts = [{key: group[key][low:high] for key in keys} for group, low, high, _ in slices]
+            if self.effective_episode_length is not None:
+                parts = [
+                    pad_transition_tail(part, self.effective_episode_length - length)
+                    if high == length and length < self.effective_episode_length
+                    else part
+                    for part, (_, _, high, length) in zip(parts, slices)
+                ]
+            item = {key: np.concatenate([part[key] for part in parts]) for key in keys}
         else:
             item = {key: groups[episode.key][key][start:end] for key in keys}
+            if (
+                self.effective_episode_length is not None
+                and end == episode.length
+                and episode.length < self.effective_episode_length
+            ):
+                item = pad_transition_tail(
+                    item, self.effective_episode_length - episode.length
+                )
         item["task_id"] = episode.task_id
         item["episode_key"] = episode.key
-        item["context_length"] = np.int64(end - start)
+        item["context_length"] = np.int64(len(item["actions"]))
         return item
 
     def __getitem__(self, index):

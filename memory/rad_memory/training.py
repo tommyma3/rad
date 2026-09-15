@@ -82,6 +82,10 @@ def train_distillation(
     pretrain_checkpoint: str | Path | None = None,
 ) -> Path:
     config = bind_manifest(config)
+    if model_kind == "AD":
+        effective = config.get("effective_episode_length")
+        if effective is not None and int(effective) > int(config["n_transit"]):
+            raise ValueError("effective_episode_length must not exceed n_transit for AD")
     seed_everything(int(config.get("seed", 0)))
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)

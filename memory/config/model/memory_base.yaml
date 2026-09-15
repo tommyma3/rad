@@ -23,6 +23,10 @@ max_gradient_rounds: 3
 max_compressions: null
 rad_batching_strategy: compression_buckets
 
+# Fixed effective episode length seen by AD/RAD: shorter episodes are padded
+# with post-terminal no-op filler (training reads and inference streaming).
+effective_episode_length: 30
+
 # Distillation optimization.
 seed: 0
 lr: 0.0003
