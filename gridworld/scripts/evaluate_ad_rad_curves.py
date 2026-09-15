@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs-root", default="./runs", help="Run directory root, relative to gridworld_test.")
     parser.add_argument("--output-dir", default="./runs/eval_curves", help="Output directory.")
     parser.add_argument("--envs", nargs="+", default=["darkroom", "dktd"], choices=["darkroom", "dktd"])
-    parser.add_argument("--methods", nargs="+", default=["RAD", "AD", "DPT", "IDT", "SOURCE"], choices=list(METHOD_LABELS))
+    parser.add_argument("--methods", nargs="+", default=["RAD", "AD", "DPT", "IDT"], choices=list(METHOD_LABELS))
     parser.add_argument("--source-history", action="append", default=[], metavar="ENV=PATH",
                         help="Override source HDF5 path per environment; otherwise use checkpoint config and --datasets-root")
     parser.add_argument("--datasets-root", default="./datasets")
@@ -430,7 +430,7 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
 def configure_plot_style() -> None:
     plt.rcParams.update(
         {
-            "figure.figsize": (6.6, 4.2),
+            "figure.figsize": (6.4, 4.0),
             "figure.dpi": 160,
             "savefig.dpi": 400,
             "font.family": "serif",
@@ -444,7 +444,7 @@ def configure_plot_style() -> None:
             "axes.spines.top": False,
             "axes.spines.right": False,
             "axes.grid": True,
-            "grid.alpha": 0.22,
+            "grid.alpha": 0.15,
             "grid.linewidth": 0.8,
             "lines.linewidth": 2.2,
             "pdf.fonttype": 42,
@@ -556,7 +556,7 @@ def plot_environment(
         max_upper = max(max_upper, float(np.nanmax(upper)))
 
         ax.plot(episodes, mean, color=color, label=label, linestyle='--' if method == 'SOURCE' else '-')
-        ax.fill_between(episodes, lower, upper, color=color, alpha=0.18, linewidth=0.0)
+        ax.fill_between(episodes, lower, upper, color=color, alpha=0.1, linewidth=0.0)
         plotted = True
 
     if not plotted:
