@@ -47,6 +47,7 @@ def _make_evaluation_callback(
     evaluation_episodes: int,
     evaluations: list[dict[str, Any]],
     metrics_path: Path,
+    evaluator=evaluate_recurrent_ppo,
 ):
     try:
         from stable_baselines3.common.callbacks import BaseCallback
@@ -63,7 +64,7 @@ def _make_evaluation_callback(
         def _on_step(self) -> bool:
             if self.num_timesteps < self.next_evaluation:
                 return True
-            metrics = evaluate_recurrent_ppo(
+            metrics = evaluator(
                 self.model,
                 validation_spec,
                 episodes=evaluation_episodes,

@@ -127,43 +127,44 @@ ablation for that comparison. Fixed-task and legacy checkpoints/artifacts cannot
 be silently mixed. Configuration paths in overrides are relative to the working
 directory; use absolute paths when launching elsewhere.
 
-## Check collection PPO convergence on one task
+## Check PPO convergence on one sampled task
 
-From `memory/`, use a saved fixed task spec from collection:
+From `memory/`, the quickest signal is to sample one fixed task and train a
+single PPO agent on it:
 
 ```bash
 uv run python check_ppo_convergence.py \
-  --task-spec PATH_TO_TASK_SPEC.json \
-  --seeds 0 1 2 --total-timesteps 1000000 \
+  --total-timesteps 200000 \
   --output-dir runs/check-ppo-task
 ```
 
-Alternatively select one exact task with `--manifest tasks/memory_s13_fixed.json
---task-id fixed-...`, or generate one with `--env-id MiniGrid-MemoryS13Random-v0
---task-seed 0 --horizon 30`. The layout stays fixed across all resets and source
-seeds. Module invocation `python -m rad_memory.check_ppo_convergence` also works.
+This freezes one random MiniGrid-MemoryS13Random-v0 layout (override the draw
+with `--task-seed`), trains one PPO learner on it, and reports whether it
+converged. To sample from a saved pool instead, pass `--manifest
+tasks/memory_s13_fixed.json`; add `--task-id fixed-...` to pin one exact task
+or `--split train`/`--split test` to limit the draw. `--task-spec
+PATH_TO_TASK_SPEC.json` reuses one saved fixed task. Module invocation
+`python -m rad_memory.check_ppo_convergence` also works.
 
-The checker calls the same `train_task` function and `PPOConfig` as collection.
-Pass `--ppo-config PATH_TO_SOURCE_CONFIG.json` to reproduce saved collection
-hyperparameters; it also accepts raw PPOConfig JSON. `--n-steps` and `--batch-size`
-can override those values. Defaults match standard collection PPO, with CPU and
-one Torch thread; `--device` and `--torch-threads` can override placement.
+This probe is deliberately light: no history artifacts, no per-evaluation
+checkpoints, a single learner seed, and 20 evaluation episodes every 10,000
+interactions (all adjustable). Unlike collection training, it is a diagnostic,
+so its outputs must not be mixed with collection data.
 
-Default PASS requires at least 90% success in each seed's final three evaluations,
-evaluated every 50,000 interactions with 100 episodes per evaluation. Initial
-untrained evaluation is excluded from the consecutive-evaluation count. Options
-`--minimum-success-rate`, `--required-consecutive-evals`, and
-`--required-seed-fraction` control the criterion. An earlier peak or too few
-evaluations does not pass. Exit code is 0 for PASS and 1 for completed FAIL.
+The learner uses the collection `PPOConfig` hyperparameters by default. Pass
+`--ppo-config PATH_TO_SOURCE_CONFIG.json` to load a saved collection config
+(raw `PPOConfig` JSON also works); `--n-steps`, `--batch-size`, `--n-epochs`,
+and `--learning-rate` override individual values.
 
-Results include `summary.json`, `learning-curves.png`, the exact task spec, and
-per-seed collection checkpoints, evaluation records, and histories. Use a fresh
-output directory for every check. Evaluation uses a separate environment with the
-same fixed configuration and deterministic actions, so repeated episodes are not
-independent randomized task trials. This tests convergence on the selected task,
-not generalization. A held-out task can be selected explicitly for diagnosis;
-probe histories carry a separate diagnostic fingerprint and must not be mixed
-with the original pool's AD/RAD training data.
+PASS requires the final `--required-consecutive-evals` evaluations (default 2)
+to reach at least `--minimum-success-rate` (default 0.9) success. The initial
+untrained evaluation is excluded from the consecutive count. Exit code is 0
+for PASS and 1 for a completed FAIL. Each evaluation prints one JSON line with
+`timesteps`, `success_rate`, `mean_return`, and `mean_episode_length`, and the
+output directory collects `summary.json`, `evaluations.json`,
+`learning-curve.png`, and the exact task spec. Evaluation uses a fresh
+environment with the same fixed configuration and deterministic actions, so
+this tests convergence on the selected task, not generalization.
 
 ## Legacy changing-layout workflow
 
