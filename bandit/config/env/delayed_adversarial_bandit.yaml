@@ -1,0 +1,3 @@
+include: config/env/adversarial_bandit.yaml
+env: delayed_adversarial_bandit
+train_delays: [100]

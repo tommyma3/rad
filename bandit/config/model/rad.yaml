@@ -1,0 +1,17 @@
+include: config/model/ad_base.yaml
+model: RAD
+context_steps: 50
+n_compress_tokens: 15
+short_memory_keep: 5
+compress_n_layers: 2
+compress_n_heads: 4
+latent_update_mode: gru_gate
+always_use_latent_prefix: false
+# null retains the full gradient path across the gap.
+max_gradient_rounds: null
+ad_lr: 0.0003
+compression_lr: 0.0001
+latent_lr: 0.0003
+pretrain:
+  train_steps: 5000
+  warmup_steps: 100
