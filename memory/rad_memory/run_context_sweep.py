@@ -42,6 +42,7 @@ def build_commands(
     runs_root: str,
     evaluation: dict,
     compute_matched_steps: int,
+    base_effective: int | None = None,
 ) -> list[tuple[str, list[str]]]:
     short = int(short_context)
     half = int(math.ceil(0.5 * horizon))
@@ -71,6 +72,13 @@ def build_commands(
     for name, context, train_steps in ad_conditions:
         run_dir = str(Path(runs_root) / f"{name}-h{horizon}-seed{seed}")
         condition_overrides = ["--override", f"n_transit={context}"]
+        # An AD window cannot hold more transitions than its context, so the fixed
+        # effective episode length shrinks with the window (train_distillation
+        # rejects effective_episode_length > n_transit for AD).
+        if base_effective is not None:
+            condition_overrides.extend(
+                ["--override", f"effective_episode_length={min(base_effective, context)}"]
+            )
         if train_steps is not None:
             condition_overrides.extend(["--override", f"train_steps={train_steps}"])
         commands.append(
@@ -184,6 +192,9 @@ def main() -> None:
 
     base_config = load_config(args.config)
     compute_matched_steps = int(base_config["train_steps"]) + int(base_config["pretrain_steps"])
+    from .effective_length import configured_effective_length
+
+    base_effective = configured_effective_length(base_config)
     evaluation = {
         "manifest": args.manifest,
         "trials": args.trials,
@@ -206,6 +217,7 @@ def main() -> None:
             args.runs_root,
             evaluation,
             compute_matched_steps,
+            base_effective,
         ):
             gpu = args.gpus[command_index % len(args.gpus)] if args.gpus else None
             matrix.append({"name": name, "seed": seed, "gpu": gpu, "command": command})

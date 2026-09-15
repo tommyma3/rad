@@ -1,6 +1,8 @@
 env_id: MiniGrid-MemoryS13Random-v0
 controlled: false
 random_length: true
+horizon: 30
+effective_episode_length: 30
 profile_episodes: 1000
 profile_seed: 0
 profile_slack: 1.25

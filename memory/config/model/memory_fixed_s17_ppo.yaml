@@ -1,0 +1,2 @@
+include: memory_fixed_ppo.yaml
+effective_episode_length: 36
