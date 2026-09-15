@@ -21,6 +21,7 @@ from .check_recurrent_ppo_convergence import (
 from .envs import MemoryTaskSpec, make_memory_env
 from .ppo import PPOConfig, build_ppo, evaluate_ppo
 from .task_pool import freeze_task, load_pool
+from .utils import load_config
 
 DEFAULT_ENV_ID = "MiniGrid-MemoryS13Random-v0"
 
@@ -55,8 +56,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-epochs", type=int)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--ppo-config",
-                        help="Collection source_config.json or raw PPOConfig JSON; "
-                             "flag overrides still win")
+                        help="Collection source_config.json/.yaml (e.g. config/source/ppo.yaml) "
+                             "or raw PPOConfig JSON; flag overrides still win")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument("--output-dir", default="runs/ppo-convergence")
@@ -131,7 +132,7 @@ def plot_curve(evaluations: list[dict], spec: MemoryTaskSpec, output: Path) -> N
 def collection_config(args: argparse.Namespace) -> PPOConfig:
     config = PPOConfig()
     if args.ppo_config:
-        value = json.loads(Path(args.ppo_config).read_text(encoding="utf-8"))
+        value = load_config(args.ppo_config)
         if value.get("source_algorithm", "ppo") != "ppo":
             raise ValueError("The supplied collection config is not standard PPO")
         config = PPOConfig(**value.get("ppo", value))

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .envs import MemoryTaskSpec, make_memory_env
+from .utils import load_config
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,50 @@ class RecurrentPPOConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+SOURCE_ALGORITHMS = ("ppo", "recurrent_ppo")
+SOURCE_BUDGET_KEYS = (
+    "total_timesteps",
+    "evaluation_interval",
+    "evaluation_episodes",
+    "minimum_success_rate",
+    "required_consecutive_evals",
+    "source_seeds",
+)
+
+
+def source_config_from_mapping(value: dict[str, Any]) -> tuple[str, RecurrentPPOConfig]:
+    """Build a source-learner config from a source_config-style mapping.
+
+    The mapping holds `source_algorithm`, a `ppo:` section with hyperparameters
+    (partial sections fall back to the dataclass defaults), and optionally the
+    training-budget keys in SOURCE_BUDGET_KEYS.
+    """
+
+    from .ppo import PPOConfig
+
+    algorithm = value.get("source_algorithm", "recurrent_ppo")
+    if algorithm not in SOURCE_ALGORITHMS:
+        raise ValueError(f"source_algorithm must be one of {SOURCE_ALGORITHMS}")
+    config_type = PPOConfig if algorithm == "ppo" else RecurrentPPOConfig
+    section = value.get("ppo") or {}
+    if not isinstance(section, dict):
+        raise ValueError("ppo must be a mapping of hyperparameters")
+    known = {item.name for item in fields(config_type)}
+    unknown = sorted(set(section) - known)
+    if unknown:
+        raise ValueError(f"Unknown {algorithm} config keys: {unknown}")
+    config = config_type(**section)
+    if config.policy != config_type().policy:
+        raise ValueError(f"{algorithm} requires policy {config_type().policy!r}")
+    return algorithm, config
+
+
+def load_source_config(path: str | Path) -> tuple[str, RecurrentPPOConfig]:
+    """Load a YAML (or JSON) source-learner config from disk."""
+
+    return source_config_from_mapping(load_config(path))
 
 
 def build_recurrent_ppo(

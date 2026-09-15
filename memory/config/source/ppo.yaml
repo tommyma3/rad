@@ -1,0 +1,29 @@
+# Source PPO worker configuration for `rad_memory.train_task_pool`.
+# Shape matches the source_config.json provenance written by collection runs:
+# `source_algorithm` selects the learner, `ppo:` holds the SB3 hyperparameters,
+# and the remaining keys set the per-worker training budget. Explicit CLI flags
+# (--total-timesteps, --n-steps, ...) override values from this file; unset
+# hyperparameters fall back to the dataclass defaults in rad_memory/recurrent_ppo.py.
+source_algorithm: ppo
+
+ppo:
+  policy: MlpPolicy
+  n_steps: 256
+  batch_size: 256
+  learning_rate: 3.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  n_epochs: 10
+  clip_range: 0.2
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  normalize_advantage: true
+
+# Per-worker training budget (CLI flags override these).
+total_timesteps: 1000000
+evaluation_interval: 50000
+evaluation_episodes: 100
+minimum_success_rate: 0.9
+required_consecutive_evals: 3
+source_seeds: [0, 1, 2]

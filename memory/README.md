@@ -78,6 +78,12 @@ processes, each with its own optimizer and history file. `--device` can override
 placement. Fixed configurations can make a reactive policy sufficient, but do not
 guarantee convergence on every partially observed task; the convergence gate still
 applies. Use `--source-algorithm recurrent_ppo` for the previous recurrent learner.
+Learner hyperparameters and the per-worker training budget can instead come from a
+YAML file such as `config/source/ppo.yaml` via `--config`, with repeatable
+`--override KEY=VALUE` tweaks; explicit CLI flags still win over file values. The
+file has the same shape as the `source_config.json` provenance written by collection
+runs (`source_algorithm`, a `ppo:` hyperparameter section, and the budget keys), so a
+saved run config can be reused directly.
 
 PPO histories live under `train/ppo/`; recurrent histories use
 `train/recurrent_ppo/`. Select `memory_fixed_ppo.yaml` for PPO distillation and
@@ -152,9 +158,9 @@ interactions (all adjustable). Unlike collection training, it is a diagnostic,
 so its outputs must not be mixed with collection data.
 
 The learner uses the collection `PPOConfig` hyperparameters by default. Pass
-`--ppo-config PATH_TO_SOURCE_CONFIG.json` to load a saved collection config
-(raw `PPOConfig` JSON also works); `--n-steps`, `--batch-size`, `--n-epochs`,
-and `--learning-rate` override individual values.
+`--ppo-config PATH` to load a saved collection config — JSON or YAML, e.g.
+`config/source/ppo.yaml` (raw `PPOConfig` JSON also works); `--n-steps`,
+`--batch-size`, `--n-epochs`, and `--learning-rate` override individual values.
 
 PASS requires the final `--required-consecutive-evals` evaluations (default 2)
 to reach at least `--minimum-success-rate` (default 0.9) success. The initial

@@ -21,6 +21,19 @@ class PPOConvergenceTest(unittest.TestCase):
             # Explicit flags override the saved config.
             args = parse_args(["--ppo-config", str(path), "--batch-size", "32"])
             self.assertEqual(collection_config(args).batch_size, 32)
+            # YAML source configs (e.g. config/source/ppo.yaml) work the same way.
+            yaml_path = Path(tmp, "source_config.yaml")
+            yaml_path.write_text(
+                "source_algorithm: ppo\n"
+                "ppo:\n"
+                f"  n_steps: {config.n_steps}\n"
+                f"  batch_size: {config.batch_size}\n"
+                f"  learning_rate: {config.learning_rate}\n"
+                f"  n_epochs: {config.n_epochs}\n",
+                encoding="utf-8",
+            )
+            args = parse_args(["--ppo-config", str(yaml_path)])
+            self.assertEqual(collection_config(args), config)
             path.write_text(json.dumps({"source_algorithm": "recurrent_ppo"}))
             with self.assertRaisesRegex(ValueError, "not standard PPO"):
                 collection_config(parse_args(["--ppo-config", str(path)]))

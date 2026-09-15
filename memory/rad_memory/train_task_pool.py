@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -10,9 +11,15 @@ import gymnasium as gym
 from .artifacts import TaskHistoryWriter, transition_record
 from .check_recurrent_ppo_convergence import has_converged
 from .envs import FlattenMemoryObservation, MemoryTaskSpec, make_memory_env
-from .recurrent_ppo import RecurrentPPOConfig, build_recurrent_ppo, evaluate_recurrent_ppo
+from .recurrent_ppo import (
+    RecurrentPPOConfig,
+    build_recurrent_ppo,
+    evaluate_recurrent_ppo,
+    source_config_from_mapping,
+)
 from .task_pool import load_pool
 from .ppo import PPOConfig, build_ppo, evaluate_ppo
+from .utils import apply_overrides, load_config
 
 
 class OnlineHistory(gym.Wrapper):
@@ -172,32 +179,89 @@ def train_pool(manifest, source_seeds, run_dir, output_root, *, workers=1, torch
     return results
 
 
-def main():
+_BUDGET_DEFAULTS = {
+    "total_timesteps": 1_000_000,
+    "evaluation_interval": 50_000,
+    "evaluation_episodes": 100,
+    "minimum_success_rate": 0.9,
+    "required_consecutive_evals": 3,
+    "source_seeds": [0, 1, 2],
+}
+
+
+def resolve_source_args(args, file_values):
+    """Merge --config file values with explicit CLI flags (flags win)."""
+
+    file_algorithm = file_values.get("source_algorithm") if file_values else None
+    if (args.source_algorithm is not None and file_algorithm is not None
+            and args.source_algorithm != file_algorithm):
+        raise ValueError("--source-algorithm conflicts with the --config source_algorithm")
+    algorithm = args.source_algorithm or file_algorithm or "ppo"
+    if file_values:
+        merged = dict(file_values)
+        merged["source_algorithm"] = algorithm
+        _, ppo_config = source_config_from_mapping(merged)
+    else:
+        config_type = PPOConfig if algorithm == "ppo" else RecurrentPPOConfig
+        ppo_config = config_type()
+    cli_hp = {key: value for key, value in
+              (("n_steps", args.n_steps), ("batch_size", args.batch_size))
+              if value is not None}
+    if cli_hp:
+        ppo_config = replace(ppo_config, **cli_hp)
+    budget = {key: (getattr(args, key) if getattr(args, key) is not None
+                    else file_values.get(key, default))
+              for key, default in _BUDGET_DEFAULTS.items()}
+    if isinstance(budget["source_seeds"], int):
+        budget["source_seeds"] = [budget["source_seeds"]]
+    return algorithm, ppo_config, budget
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--source-algorithm", choices=("ppo", "recurrent_ppo"), default="ppo")
+    parser.add_argument("--config",
+                        help="YAML source worker config (see config/source/ppo.yaml); "
+                             "CLI flags override its values")
+    parser.add_argument("--override", action="append", default=[],
+                        help="Override a --config value as KEY=VALUE; repeatable")
+    parser.add_argument("--source-algorithm", choices=("ppo", "recurrent_ppo"),
+                        help="Default: ppo, or the --config source_algorithm")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument("--device", default=None)
-    parser.add_argument("--source-seeds", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument("--source-seeds", type=int, nargs="+",
+                        help="Default: 0 1 2, or the --config source_seeds")
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--output-root", default="datasets-fixed")
-    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
-    parser.add_argument("--evaluation-interval", type=int, default=50_000)
-    parser.add_argument("--evaluation-episodes", type=int, default=100)
-    parser.add_argument("--minimum-success-rate", type=float, default=0.9)
-    parser.add_argument("--required-consecutive-evals", type=int, default=3)
-    parser.add_argument("--n-steps", type=int, default=256)
-    parser.add_argument("--batch-size", type=int, default=256)
-    args = parser.parse_args()
-    config_type = PPOConfig if args.source_algorithm == "ppo" else RecurrentPPOConfig
-    train_pool(args.manifest, args.source_seeds, args.run_dir, args.output_root,
-               source_algorithm=args.source_algorithm, workers=args.workers,
+    parser.add_argument("--total-timesteps", type=int,
+                        help="Default: 1000000, or the --config total_timesteps")
+    parser.add_argument("--evaluation-interval", type=int,
+                        help="Default: 50000, or the --config evaluation_interval")
+    parser.add_argument("--evaluation-episodes", type=int,
+                        help="Default: 100, or the --config evaluation_episodes")
+    parser.add_argument("--minimum-success-rate", type=float,
+                        help="Default: 0.9, or the --config minimum_success_rate")
+    parser.add_argument("--required-consecutive-evals", type=int,
+                        help="Default: 3, or the --config required_consecutive_evals")
+    parser.add_argument("--n-steps", type=int,
+                        help="Default: 256, or the --config ppo.n_steps")
+    parser.add_argument("--batch-size", type=int,
+                        help="Default: 256, or the --config ppo.batch_size")
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_args()
+    file_values = {}
+    if args.config:
+        file_values = apply_overrides(load_config(args.config), args.override)
+    algorithm, ppo_config, budget = resolve_source_args(args, file_values)
+    source_seeds = budget.pop("source_seeds")
+    train_pool(args.manifest, source_seeds, args.run_dir, args.output_root,
+               source_algorithm=algorithm, workers=args.workers,
                torch_threads=args.torch_threads, device=args.device,
-               total_timesteps=args.total_timesteps, evaluation_interval=args.evaluation_interval,
-               evaluation_episodes=args.evaluation_episodes, minimum_success_rate=args.minimum_success_rate,
-               required_consecutive_evals=args.required_consecutive_evals,
-               ppo_config=config_type(n_steps=args.n_steps, batch_size=args.batch_size))
+               ppo_config=ppo_config, **budget)
 
 
 if __name__ == "__main__":
