@@ -1,5 +1,5 @@
 env: adversarial_bandit
-num_arms: 10
+num_arms: 5
 distribution: uniform
 reward_std: 0.3
 pre_steps: 50

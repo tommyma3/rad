@@ -7,7 +7,7 @@ from .env import BANDIT, DelayedBandit
 
 def generate_history(task, *, delay=100, pre_steps=50, post_steps=50,
                      reward_seed=0, learner_seed=1, distractor_seed=2,
-                     exploration_coefficient=2**0.5, policy=None, prefix=None):
+                     exploration_coefficient=1.0, policy=None, prefix=None):
     env = DelayedBandit(task, reward_seed, pre_steps, post_steps, delay)
     learner = UCB(env.num_arms, exploration_coefficient, learner_seed)
     distractor = np.random.default_rng(distractor_seed)

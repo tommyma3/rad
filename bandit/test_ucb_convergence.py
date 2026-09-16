@@ -188,6 +188,20 @@ def plot_curves(output, task, runs, args):
     fig.savefig(output / "learning_curves.pdf")
     plt.close(fig)
 
+    fig, axis = plt.subplots(figsize=(7, 4.5))
+    for run in runs:
+        cumulative_regret = np.concatenate(([0.0], run["cumulative_regret"]))
+        axis.plot(np.arange(len(cumulative_regret)), cumulative_regret,
+                  label=f"seed {run['learner_seed']}")
+    axis.set(xlabel="Arm pulls", ylabel="Cumulative expected regret",
+             title=f"Fixed task seed {task.seed}, {task.distribution}")
+    axis.grid(alpha=0.2)
+    axis.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output / "cumulative_regret.png", dpi=160)
+    fig.savefig(output / "cumulative_regret.pdf")
+    plt.close(fig)
+
 
 def run_check(args):
     config = get_config(f"config/env/{args.env}.yaml")
@@ -297,6 +311,11 @@ def run_check(args):
             write_json(seed_dir / "evaluations.json", evaluations)
             write_csv(seed_dir / "episodes.csv", episodes)
             write_csv(seed_dir / "pulls.csv", episodes)
+            cumulative_regret = np.cumsum([r["regret"] for r in pull_records])
+            write_csv(seed_dir / "cumulative_regret.csv", [
+                {"arm_pulls": pull, "cumulative_regret": float(regret)}
+                for pull, regret in enumerate(cumulative_regret, start=1)
+            ])
             history_lengths = [len(h["states"]) for h in histories]
             if len(set(history_lengths)) == 1:
                 history_arrays = {key: np.stack([h[key] for h in histories])
@@ -313,12 +332,14 @@ def run_check(args):
                       "final_evaluation": evaluations[-1],
                       "final_consecutive_checks": [r["passed"] for r in evaluations[-args.required_consecutive_evals:]]}
             write_json(seed_dir / "result.json", result)
-            runs.append({**result, "episodes": episodes, "evaluations": evaluations})
+            runs.append({**result, "episodes": episodes, "evaluations": evaluations,
+                         "cumulative_regret": cumulative_regret})
         fraction = sum(r["passed"] for r in runs) / len(runs)
         result = {"task": task.to_dict(), "optimal_mean": optimal,
                   "best_second_best_gap": float(np.sort(means)[-1] - np.sort(means)[-2]),
                   "passing_seed_fraction": fraction, "passed": fraction >= args.required_seed_fraction,
-                  "runs": [{k: v for k, v in r.items() if k not in ("episodes", "evaluations")} for r in runs]}
+                  "runs": [{k: v for k, v in r.items()
+                            if k not in ("episodes", "evaluations", "cumulative_regret")} for r in runs]}
         task_results.append(result)
         write_json(task_dir / "summary.json", result)
         plot_curves(task_dir, task, runs, args)

@@ -16,7 +16,7 @@ method, including during evaluation. They enter the model's history and advance
 RAD compression, but are never action-prediction targets. Policies cannot use
 their own distractor actions as an external memory channel.
 
-UCB counts, reward sums, tie-breaking RNG, and its genuine-pull clock remain
+UCB counts, reward sums, and its genuine-pull clock remain
 unchanged throughout the gap. Only a new task resets policy memory. Reward draws
 are indexed by genuine pull and arm, using a separate RNG from task generation,
 UCB, and distractors. Inserting or extending a gap leaves UCB's 100 genuine
@@ -46,9 +46,13 @@ collections, manifests, and checkpoints are incompatible: collect new histories
 and retrain models for this reward specification. Existing result files are left
 as records of the earlier reward setting; use fresh output directories for new runs.
 
-UCB first visits every unpulled arm in random order. Subsequently it maximizes
-`reward_sum[a]/count[a] + c*sqrt(log(total_pulls)/count[a])`, with
-`c=sqrt(2)` and uniform tie-breaking among exact maximizers.
+UCB follows DPT's vectorized online baseline: it first visits each arm in index
+order, then maximizes `reward_sum[a]/count[a] + c/sqrt(count[a])`, with `c=1.0`
+and ties resolved to the lowest arm index. Collection, source-policy evaluation,
+and the convergence checker share this rule. Actions are deterministic given
+the observed history; reward seeds still produce independent learning runs.
+The algorithm is recorded as `dpt_ucb` in configurations. Existing `ucb1`
+artifacts describe the previous exploration rule; new collections use DPT UCB.
 
 ## Setup
 
@@ -236,7 +240,10 @@ uv run --project bandit python bandit/test_ucb_convergence.py --pulls 100 --eval
 
 The script exits **0 for PASS, 1 for FAIL**. Too few checks or an incomplete
 rolling window cannot pass. A nonempty output directory is rejected. Outputs
-include root/task/seed JSON summaries, per-episode CSV metrics keyed by arm-pull
+include `task-<task_seed>/cumulative_regret.png` and `.pdf`, with one curve
+per learner seed showing `sum(mu_best - mu_selected)` over genuine arm pulls.
+Each seed's per-pull values are saved in `seed-<seed>/cumulative_regret.csv`.
+Other outputs include root/task/seed JSON summaries, per-episode CSV metrics keyed by arm-pull
 count, independent
 evaluation results, full chronological NPZ histories, final UCB state, and
 per-task PNG/PDF learning curves showing every learner seed.
