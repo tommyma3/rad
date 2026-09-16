@@ -1,2 +1,2 @@
-algorithm: ucb1
-exploration_coefficient: 1.4142135623730951
+algorithm: dpt_ucb
+exploration_coefficient: 1.0
