@@ -13,5 +13,5 @@ ad_lr: 0.0003
 compression_lr: 0.0001
 latent_lr: 0.0003
 pretrain:
-  train_steps: 5000
-  warmup_steps: 100
+  train_steps: 20000
+  warmup_steps: 500
