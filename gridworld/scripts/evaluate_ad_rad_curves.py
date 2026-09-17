@@ -524,7 +524,7 @@ def summarize_rewards(rewards: np.ndarray, window: int) -> tuple[np.ndarray, np.
 
 
 def plot_environment(
-    env: str,
+    env: str | list[str],
     detail_rows: list[dict],
     output_dir: Path,
     window: int,
@@ -533,49 +533,57 @@ def plot_environment(
 ) -> list[Path]:
     configure_plot_style()
 
-    fig, ax = plt.subplots()
-    max_upper = 0.0
+    envs = [env] if isinstance(env, str) else list(dict.fromkeys(env))
+    envs = [name for name in envs if any(row['env'] == name for row in detail_rows)]
+    if not envs:
+        return []
+
+    fig, axes = plt.subplots(1, len(envs), figsize=(6.4 * len(envs), 4.4), squeeze=False)
     saved_paths = []
-    plotted = False
+    legend_handles = {}
 
-    max_episodes = 1
-    for method in ('RAD', 'AD', 'DPT', 'IDT', 'SOURCE'):
-        rewards = load_plot_rewards(detail_rows, env, method)
-        if rewards is None:
-            continue
+    for ax, env in zip(axes[0], envs):
+        max_upper = 0.0
+        max_episodes = 1
+        for method in ('RAD', 'AD', 'DPT', 'IDT', 'SOURCE'):
+            rewards = load_plot_rewards(detail_rows, env, method)
+            if rewards is None:
+                continue
 
-        episodes, mean, std = summarize_rewards(rewards, window)
-        max_episodes = max(max_episodes, int(episodes[-1]))
-        color = METHOD_COLORS[method]
-        label = f'{METHOD_LABELS[method]}'
-        if method == 'SOURCE':
-            algorithms = sorted({row.get('source_algorithm', 'RL') for row in detail_rows if row['env'] == env and row['method'] == method})
-            label = f"Source {'/'.join(algorithms)} (training)"
-        lower = np.maximum(mean - std, 0.0)
-        upper = mean + std
-        max_upper = max(max_upper, float(np.nanmax(upper)))
+            episodes, mean, std = summarize_rewards(rewards, window)
+            max_episodes = max(max_episodes, int(episodes[-1]))
+            color = METHOD_COLORS[method]
+            label = METHOD_LABELS[method]
+            if method == 'SOURCE':
+                algorithms = sorted({row.get('source_algorithm', 'RL') for row in detail_rows if row['env'] in envs and row['method'] == method})
+                label = f"Source {'/'.join(algorithms)} (training)"
+            lower = np.maximum(mean - std, 0.0)
+            upper = mean + std
+            max_upper = max(max_upper, float(np.nanmax(upper)))
 
-        ax.plot(episodes, mean, color=color, label=label, linestyle='--' if method == 'SOURCE' else '-')
-        ax.fill_between(episodes, lower, upper, color=color, alpha=0.1, linewidth=0.0)
-        plotted = True
+            line, = ax.plot(episodes, mean, color=color, label=label, linestyle='--' if method == 'SOURCE' else '-')
+            ax.fill_between(episodes, lower, upper, color=color, alpha=0.1, linewidth=0.0)
+            legend_handles.setdefault(method, line)
 
-    if not plotted:
+        env_label = ENV_LABELS[env]
+        ax.set_title(f'{env_label} Evaluation Performance')
+        ax.set_xlabel('Episode (in-context evaluation / source RL training)')
+        ax.set_ylabel('Average episode reward')
+        ax.set_xlim(1, max(2, max_episodes))
+        ax.set_ylim(0, max_upper * 1.08 if max_upper > 0 else 1)
+        ax.margins(x=0.01)
+
+    if not legend_handles:
         plt.close(fig)
         return saved_paths
 
-    env_label = ENV_LABELS[env]
-    ax.set_title(f'{env_label} Evaluation Performance')
-    ax.set_xlabel('Episode (in-context evaluation / source RL training)')
-    ax.set_ylabel('Average episode reward')
-    ax.set_xlim(1, max(2, max_episodes))
-    ax.set_ylim(0, max_upper * 1.08 if max_upper > 0 else 1)
-    ax.legend(frameon=False, loc='best')
-    ax.margins(x=0.01)
-
-    fig.tight_layout()
+    handles = [legend_handles[method] for method in ('RAD', 'AD', 'DPT', 'IDT', 'SOURCE') if method in legend_handles]
+    fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.01),
+               ncol=len(handles), frameon=False)
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f'ad_rad_{env}_eval_rewards'
+    stem = f"ad_rad_{'_'.join(envs)}_eval_rewards"
     for fmt in formats:
         suffix = fmt.lstrip('.')
         output_path = output_dir / f'{stem}.{suffix}'
@@ -684,9 +692,7 @@ def main() -> None:
     ]
     write_csv(output_dir / "summary.csv", summary_rows, summary_fields)
 
-    saved_figures = []
-    for env in args.envs:
-        saved_figures.extend(plot_environment(env, rows, output_dir, args.window, args.formats, args.dpi))
+    saved_figures = plot_environment(args.envs, rows, output_dir, args.window, args.formats, args.dpi)
 
     print(f"Wrote {output_dir / 'detail.csv'}")
     print(f"Wrote {output_dir / 'summary.csv'}")
