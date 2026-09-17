@@ -42,7 +42,7 @@ uv run python -m rad_memory.profile_memory_task \
 uv run python -m rad_memory.train_task_pool \
   --manifest tasks/memory_s13_fixed.json --source-seeds 0 1 2 \
   --source-algorithm ppo --workers 4 --torch-threads 1 --device cpu \
-  --total-timesteps 1000000 --evaluation-interval 50000 \
+  --streams 4 --total-timesteps 1000000 --evaluation-interval 50000 \
   --evaluation-episodes 100 --minimum-success-rate 0.9 --required-consecutive-evals 3 \
   --run-dir runs/source-fixed --output-root datasets-fixed
 
@@ -60,9 +60,14 @@ configurations than the requested pool size; reduce `--num-tasks` in that case.
 The profiler examines training tasks only. Horizon 30 is an example: check the
 profile before source training, and generate a new manifest if it is unsuitable.
 
-Each `(training task, source seed)` gets a fresh learner and one
-chronological interaction stream. Its network learns across episodes; its LSTM
-state resets each episode when using RecurrentPPO. Test tasks are never source-trained by this command.
+Each `(training task, source seed)` gets a fresh learner. With `--streams N`
+(the default is 1), the learner steps N parallel copies of the same fixed task
+in one vec env and trains one shared network across all of them; each stream
+records its own chronological interaction stream into a separate
+`{run_id}-stream-{k}.hdf5` history. `--total-timesteps` is the shared learner
+budget, so each stream sees roughly `total_timesteps / N` env steps. Its
+network learns across episodes; its LSTM state resets each episode when using
+RecurrentPPO. Test tasks are never source-trained by this command.
 Histories contain the actual training actions from exploration onward, rather
 than separate rollouts of saved policies. Final incomplete episodes are omitted
 and their step count recorded. Interrupted runs remain marked incomplete; fresh
@@ -146,7 +151,11 @@ uv run python check_ppo_convergence.py \
 
 This freezes one random MiniGrid-MemoryS13Random-v0 layout (override the draw
 with `--task-seed`), trains one PPO learner on it, and reports whether it
-converged. To sample from a saved pool instead, pass `--manifest
+converged. To probe the exact setup collection will use, pass `--profile
+profiles/memory-s13-random.json`: generated tasks then use the profiler's
+measured `recommended_horizon` and layout settings, so probe episodes match
+the episode lengths collection trains with (explicit `--horizon`/`--env-id`
+flags still win). To sample from a saved pool instead, pass `--manifest
 tasks/memory_s13_fixed.json`; add `--task-id fixed-...` to pin one exact task
 or `--split train`/`--split test` to limit the draw. `--task-spec
 PATH_TO_TASK_SPEC.json` reuses one saved fixed task. Module invocation

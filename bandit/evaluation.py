@@ -4,6 +4,7 @@ from collections import defaultdict
 import csv
 import json
 from pathlib import Path
+import re
 
 import numpy as np
 import torch
@@ -161,29 +162,100 @@ def summarize(rows):
     return result
 
 
+METHOD_STYLES = {
+    "ucb": {"color": "#999999", "linestyle": "--", "marker": ""},
+    "random": {"color": "#666666", "linestyle": ":", "marker": ""},
+    "adlong": {"color": "#0072B2", "linestyle": "-", "marker": "o"},
+    "adshort": {"color": "#E69F00", "linestyle": "-", "marker": "^"},
+    "rad": {"color": "#009E73", "linestyle": "-", "marker": "s"},
+}
+STYLE_FALLBACK_COLORS = ("#D55E00", "#CC79A7", "#56B4E9", "#F0E442")
+STYLE_FALLBACK_MARKERS = ("D", "v", "P", "X")
+
+PAPER_RC = {
+    "font.family": "serif",
+    "font.size": 9,
+    "axes.labelsize": 9,
+    "axes.titlesize": 9,
+    "axes.linewidth": 0.6,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "xtick.major.width": 0.6,
+    "ytick.major.width": 0.6,
+    "legend.fontsize": 8,
+    "grid.linewidth": 0.5,
+    "grid.alpha": 0.25,
+    "lines.linewidth": 1.5,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+}
+
+
+def method_styles(methods):
+    """Colorblind-safe styles; baselines are muted, and line/marker shapes keep
+    methods distinguishable in grayscale and for unknown label spellings."""
+    styles = {}
+    fallback = 0
+    for method in methods:
+        key = method.lower().replace("-", "").replace("_", "")
+        if key in METHOD_STYLES:
+            styles[method] = dict(METHOD_STYLES[key])
+        else:
+            styles[method] = {"color": STYLE_FALLBACK_COLORS[fallback % len(STYLE_FALLBACK_COLORS)],
+                              "linestyle": "-",
+                              "marker": STYLE_FALLBACK_MARKERS[fallback % len(STYLE_FALLBACK_MARKERS)]}
+            fallback += 1
+    return styles
+
+
+def method_plot_order(methods):
+    """Draw baselines first so distilled-policy lines stay on top."""
+    return sorted(methods, key=lambda m: (m.lower() in ("ucb", "random"), m.lower()))
+
+
 def plot_summary(summary, output, reference_context):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     distributions = sorted({row["distribution"] for row in summary})
-    fig, axes = plt.subplots(2, len(distributions), figsize=(4 * len(distributions), 6), squeeze=False)
-    for column, distribution in enumerate(distributions):
-        for method in sorted({r["method"] for r in summary}):
-            points = sorted((r for r in summary if r["method"] == method and r["distribution"] == distribution),
-                            key=lambda r: r["delay"])
+    methods = sorted({r["method"] for r in summary})
+    styles = method_styles(methods)
+    order = method_plot_order(methods)
+    with plt.rc_context(PAPER_RC):
+        fig, axes = plt.subplots(2, len(distributions), figsize=(3.5 * len(distributions), 5.0),
+                                 squeeze=False, layout="constrained")
+        handles = {}
+        for column, distribution in enumerate(distributions):
             for row_index, metric in enumerate(("post_return", "first_10_return")):
-                axes[row_index, column].errorbar([p["delay"] / reference_context for p in points],
-                                                [p[metric] for p in points],
-                                                yerr=[p[f"{metric}_ci95"] for p in points],
-                                                marker="o", label=method, capsize=2)
-                axes[row_index, column].set(xlabel=f"Delay / {reference_context}", ylabel=metric.replace("_", " "))
-                axes[row_index, column].grid(alpha=0.2)
-        axes[0, column].set_title(distribution)
-    axes[0, 0].legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(Path(output) / "delay_sweep.png", dpi=180)
-    fig.savefig(Path(output) / "delay_sweep.pdf")
+                axis = axes[row_index, column]
+                series = []
+                for method in order:
+                    points = sorted((r for r in summary if r["method"] == method
+                                     and r["distribution"] == distribution), key=lambda r: r["delay"])
+                    if not points:
+                        continue
+                    x = np.asarray([p["delay"] / reference_context for p in points])
+                    y = np.asarray([p[metric] for p in points])
+                    ci = np.asarray([p[f"{metric}_ci95"] for p in points])
+                    series.append((method, x, y, ci))
+                for method, x, y, ci in series:
+                    if ci.any():
+                        axis.fill_between(x, y - ci, y + ci, color=styles[method]["color"],
+                                          alpha=0.15, linewidth=0)
+                for method, x, y, ci in series:
+                    (line,) = axis.plot(x, y, **styles[method], markersize=4)
+                    handles[method] = line
+                axis.set(xlabel=f"Delay / {reference_context}", ylabel=metric.replace("_", " "))
+                axis.grid(True)
+                axis.margins(x=0.08, y=0.18)
+            axes[0, column].set_title(distribution)
+        legend_methods = [m for m in order if m in handles]
+        fig.legend([handles[m] for m in legend_methods], legend_methods,
+                   loc="outside lower center", ncol=max(2, int(np.ceil(len(legend_methods) / 2))),
+                   frameon=False)
+        fig.savefig(Path(output) / "delay_sweep.png", dpi=300)
+        fig.savefig(Path(output) / "delay_sweep.pdf")
     plt.close(fig)
 
 
@@ -196,40 +268,100 @@ def plot_cumulative_regret(summary, output, pre_steps):
     distributions = sorted({row["distribution"] for row in summary})
     delays = sorted({row["delay"] for row in summary})
     methods = sorted({row["method"] for row in summary})
+    styles = method_styles(methods)
+    order = method_plot_order(methods)
     total_pulls = max(len(row["regret_curve"]) for row in summary)
-    fig, axes = plt.subplots(len(distributions), len(delays),
-                             figsize=(3.6 * len(delays), 3.4 * len(distributions)), squeeze=False)
-    for column, delay in enumerate(delays):
-        for row_index, distribution in enumerate(distributions):
-            axis = axes[row_index, column]
-            for method in methods:
+    panels = {}
+    ymax = 0.0
+    for distribution in distributions:
+        for delay in delays:
+            curves = {}
+            for method in order:
                 row = next((r for r in summary if r["method"] == method
                             and r["distribution"] == distribution and r["delay"] == delay), None)
                 if row is None:
                     continue
-                cumulative_regret = np.concatenate(([0.0], np.cumsum(row["regret_curve"])))
-                std = np.concatenate(([0.0], np.asarray(
-                    row.get("regret_curve_std") or np.zeros(len(row["regret_curve"])), dtype=float)))
-                x = np.arange(len(cumulative_regret))
-                (line,) = axis.plot(x, cumulative_regret, label=method)
-                axis.fill_between(x, cumulative_regret - std, cumulative_regret + std,
-                                  color=line.get_color(), alpha=0.15)
-            axis.set(xlabel="Arm pulls", ylabel="Cumulative expected regret", title=f"delay {delay}")
-            axis.grid(alpha=0.2)
-            axis.set_xlim(0, total_pulls)
-            axis.axvspan(0, pre_steps, color="tab:blue", alpha=0.05)
-            axis.axvspan(pre_steps, total_pulls, color="tab:orange", alpha=0.05)
-            axis.axvline(pre_steps, color="black", linestyle="--", linewidth=0.8)
-            label_transform = blended_transform_factory(axis.transData, axis.transAxes)
-            axis.text(pre_steps / 2, 0.96, "before delay", transform=label_transform,
-                      ha="center", va="top", fontsize=8)
-            axis.text((pre_steps + total_pulls) / 2, 0.96, "after delay", transform=label_transform,
-                      ha="center", va="top", fontsize=8)
-    axes[0, 0].legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(Path(output) / "cumulative_regret.png", dpi=180)
-    fig.savefig(Path(output) / "cumulative_regret.pdf")
+                cumulative = np.concatenate(([0.0], np.cumsum(row["regret_curve"])))
+                curves[method] = cumulative
+                ymax = max(ymax, float(cumulative[pre_steps:].max()))
+            if curves:
+                panels[(distribution, delay)] = curves
+    with plt.rc_context(PAPER_RC):
+        fig, axes = plt.subplots(len(distributions), len(delays),
+                                 figsize=(1.55 * len(delays) + 0.9, 1.9 * len(distributions) + 0.6),
+                                 squeeze=False, layout="constrained")
+        handles = {}
+        for column, delay in enumerate(delays):
+            for row_index, distribution in enumerate(distributions):
+                axis = axes[row_index, column]
+                curves = panels.get((distribution, delay), {})
+                # Every method experiences the same gap-free pre-gap rollout, so
+                # a single shared curve keeps the pre-gap region readable.
+                pre = np.mean([c[: pre_steps + 1] for c in curves.values()], axis=0)
+                (pre_line,) = axis.plot(np.arange(pre_steps + 1), pre, color="0.15", linewidth=1.2)
+                handles["pre-gap (shared)"] = pre_line
+                for method in order:
+                    if method not in curves:
+                        continue
+                    cumulative = curves[method]
+                    (line,) = axis.plot(np.arange(pre_steps, len(cumulative)),
+                                        cumulative[pre_steps:], **{**styles[method], "marker": ""})
+                    handles[method] = line
+                axis.axvline(pre_steps, color="black", linestyle="--", linewidth=0.8)
+                axis.set(xlabel="Arm pulls", title=f"delay {delay}", xlim=(0, total_pulls),
+                         ylim=(0.0, ymax * 1.05))
+                if column == 0:
+                    axis.set(ylabel="Cumulative expected regret")
+                axis.grid(True)
+                label_transform = blended_transform_factory(axis.transData, axis.transAxes)
+                axis.text(pre_steps / 2, 0.96, "before delay", transform=label_transform,
+                          ha="center", va="top", fontsize=7)
+                axis.text((pre_steps + total_pulls) / 2, 0.96, "after delay", transform=label_transform,
+                          ha="center", va="top", fontsize=7)
+        legend_entries = ["pre-gap (shared)"] + [m for m in order if m in handles]
+        fig.legend([handles[m] for m in legend_entries], legend_entries,
+                   loc="outside lower center", ncol=len(legend_entries), frameon=False)
+        fig.savefig(Path(output) / "cumulative_regret.png", dpi=300)
+        fig.savefig(Path(output) / "cumulative_regret.pdf")
     plt.close(fig)
+
+
+RUN_FAMILY_PATTERN = re.compile(r"^(?P<family>.+)_s(?P<seed>\d+)$")
+CHECKPOINT_PATTERN = re.compile(r"^checkpoint-(?P<step>\d+)$")
+
+
+def discover_run_checkpoints(runs_dir):
+    """Group training runs by family and select each run's max-iteration checkpoint.
+
+    Run directories named ``<family>_s<seed>`` belong to one method; giving every
+    run in a family the same label makes the summary average over training runs.
+    Runs without a completed distilled checkpoint (e.g. pretraining only) are
+    returned in ``skipped`` and excluded from ``discovered``.
+    """
+    discovered = defaultdict(list)
+    skipped = []
+    for run_dir in sorted(path for path in Path(runs_dir).iterdir() if path.is_dir()):
+        candidates = []
+        for child in run_dir.iterdir():
+            match = CHECKPOINT_PATTERN.match(child.name)
+            if match and child.is_dir() and (child / "model.pt").exists():
+                candidates.append((int(match.group("step")), child))
+        if not candidates:
+            continue
+        step, checkpoint_dir = max(candidates)
+        training = json.loads((checkpoint_dir / "training.json").read_text(encoding="utf-8"))
+        if training.get("phase") != "distill":
+            skipped.append(run_dir.name)
+            continue
+        match = RUN_FAMILY_PATTERN.match(run_dir.name)
+        family = match.group("family") if match else run_dir.name
+        seed = int(match.group("seed")) if match else None
+        discovered[family].append({"run": run_dir.name, "seed": seed, "step": step,
+                                   "checkpoint": checkpoint_dir})
+    for runs in discovered.values():
+        runs.sort(key=lambda item: (item["seed"] is None, item["seed"] if item["seed"] is not None else 0,
+                                    item["run"]))
+    return dict(discovered), skipped
 
 
 def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000, eval_seeds=1,

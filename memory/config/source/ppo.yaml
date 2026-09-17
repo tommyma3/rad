@@ -8,8 +8,8 @@ source_algorithm: ppo
 
 ppo:
   policy: MlpPolicy
-  n_steps: 60
-  batch_size: 60
+  n_steps: 30
+  batch_size: 600
   learning_rate: 3.0e-4
   gamma: 0.99
   gae_lambda: 0.95
@@ -21,8 +21,15 @@ ppo:
   normalize_advantage: true
 
 # Per-worker training budget (CLI flags override these).
-total_timesteps: 20000
-evaluation_interval: 1000
+# `streams` parallel env copies of each (task, seed) are stepped together in one
+# vec env and trained by one shared learner; each stream writes its own
+# `{run_id}-stream-{k}.hdf5` history (streams: 1 keeps the single `{run_id}.hdf5`
+# layout). `total_timesteps` is the shared learner budget across all streams, so
+# each stream sees roughly total_timesteps / streams env steps; keep
+# ppo.batch_size <= ppo.n_steps * streams.
+streams: 20
+total_timesteps: 100000
+evaluation_interval: 5000
 evaluation_episodes: 100
 minimum_success_rate: 0.9
 required_consecutive_evals: 3

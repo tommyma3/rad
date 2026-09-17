@@ -1,7 +1,12 @@
-"""Independent PPO/RecurrentPPO training and online collection per fixed task."""
+"""Independent PPO/RecurrentPPO training and online collection per fixed task.
+
+Each (task, source seed) learner may run several parallel streams — copies of the
+same fixed task stepped together in one vec env and trained by one shared SB3
+learner — with one chronological history artifact written per stream."""
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -55,13 +60,16 @@ def train_task(spec, manifest_fingerprint, source_seed, run_dir, output_root, *,
                total_timesteps=1_000_000, evaluation_interval=50_000,
                evaluation_episodes=100, minimum_success_rate=0.9,
                required_consecutive_evals=3, ppo_config=None,
-               source_algorithm="recurrent_ppo", device=None, verbose=1):
+               source_algorithm="recurrent_ppo", device=None, verbose=1, streams=1):
     from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.vec_env import DummyVecEnv
 
     if spec.split != "train" or spec.configuration is None:
         raise ValueError("Source training requires a fixed training task")
     if min(total_timesteps, evaluation_interval, evaluation_episodes, required_consecutive_evals) <= 0:
         raise ValueError("Training and evaluation counts must be positive")
+    if streams < 1:
+        raise ValueError("streams must be positive")
     if not 0 <= minimum_success_rate <= 1:
         raise ValueError("minimum_success_rate must be in [0, 1]")
     if source_algorithm not in {"ppo", "recurrent_ppo"}:
@@ -77,18 +85,25 @@ def train_task(spec, manifest_fingerprint, source_seed, run_dir, output_root, *,
     # to train on the same task/seed in one output root.
     run_id = f"{spec.task_id}-source-{source_seed}" + ("-ppo" if source_algorithm == "ppo" else "")
     run_dir = Path(run_dir) / run_id
-    artifact = Path(output_root) / "train" / source_algorithm / f"{run_id}.hdf5"
-    if run_dir.exists() or artifact.exists():
+    if streams == 1:
+        artifact_paths = [Path(output_root) / "train" / source_algorithm / f"{run_id}.hdf5"]
+    else:
+        artifact_paths = [
+            Path(output_root) / "train" / source_algorithm / f"{run_id}-stream-{k}.hdf5"
+            for k in range(streams)
+        ]
+    if run_dir.exists() or any(path.exists() for path in artifact_paths):
         raise ValueError(f"Refusing to append a fresh learner to existing run {run_id}")
     run_dir.mkdir(parents=True)
-    provenance = {
+    base_provenance = {
         "manifest_fingerprint": manifest_fingerprint, "run_id": run_id,
-        "source_seed": source_seed, "stream_id": 0, "history_kind": "online_training",
+        "source_seed": source_seed, "streams": streams, "history_kind": "online_training",
         "ppo": ppo_config.to_dict(), "total_timesteps": total_timesteps,
         "source_algorithm": source_algorithm, "device": device,
     }
+    provenances = [base_provenance | {"stream_id": k} for k in range(streams)]
     (run_dir / "task_spec.json").write_text(json.dumps(spec.to_dict(), indent=2), encoding="utf-8")
-    (run_dir / "source_config.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
+    (run_dir / "source_config.json").write_text(json.dumps(base_provenance, indent=2), encoding="utf-8")
     evaluations = []
 
     def evaluate(model):
@@ -112,10 +127,21 @@ def train_task(spec, manifest_fingerprint, source_seed, run_dir, output_root, *,
                 self.next_evaluation += evaluation_interval
             return True
 
-    with TaskHistoryWriter(artifact, spec, source_algorithm, provenance) as writer:
-        writer.handle.attrs["collection_complete"] = False
-        recorder = OnlineHistory(make_memory_env(spec), writer)
-        env = FlattenMemoryObservation(recorder)
+    with ExitStack() as stack:
+        writers = [
+            stack.enter_context(TaskHistoryWriter(path, spec, source_algorithm, provenance))
+            for path, provenance in zip(artifact_paths, provenances)
+        ]
+        for writer in writers:
+            writer.handle.attrs["collection_complete"] = False
+        recorders = [None] * streams
+
+        def make_stream(k):
+            recorder = OnlineHistory(make_memory_env(spec), writers[k])
+            recorders[k] = recorder
+            return FlattenMemoryObservation(recorder)
+
+        env = DummyVecEnv([lambda k=k: make_stream(k) for k in range(streams)])
         try:
             model = builder(env, seed=source_seed, config=ppo_config, device=device, verbose=verbose,
                             tensorboard_log=run_dir / "tensorboard")
@@ -125,14 +151,17 @@ def train_task(spec, manifest_fingerprint, source_seed, run_dir, output_root, *,
             evaluate(model)
             converged = has_converged(evaluations[1:], minimum_success_rate=minimum_success_rate,
                                       required_consecutive_evals=required_consecutive_evals)
-            writer.handle.attrs["source_converged"] = converged
-            writer.handle.attrs["collection_complete"] = True
-            writer.handle.attrs["discarded_tail_steps"] = len(recorder.steps)
+            for writer in writers:
+                writer.handle.attrs["source_converged"] = converged
+                writer.handle.attrs["collection_complete"] = True
+            for k, writer in enumerate(writers):
+                writer.handle.attrs["discarded_tail_steps"] = len(recorders[k].steps)
         finally:
             env.close()
     result = {"task_id": spec.task_id, "source_seed": source_seed, "converged": converged,
-              "source_algorithm": source_algorithm,
-              "artifact": str(artifact), "minimum_success_rate": minimum_success_rate,
+              "source_algorithm": source_algorithm, "streams": streams,
+              "artifacts": [str(path) for path in artifact_paths],
+              "minimum_success_rate": minimum_success_rate,
               "required_consecutive_evals": required_consecutive_evals}
     (run_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
@@ -186,6 +215,7 @@ _BUDGET_DEFAULTS = {
     "minimum_success_rate": 0.9,
     "required_consecutive_evals": 3,
     "source_seeds": [0, 1, 2],
+    "streams": 1,
 }
 
 
@@ -244,6 +274,8 @@ def parse_args(argv=None):
                         help="Default: 0.9, or the --config minimum_success_rate")
     parser.add_argument("--required-consecutive-evals", type=int,
                         help="Default: 3, or the --config required_consecutive_evals")
+    parser.add_argument("--streams", type=int,
+                        help="Default: 1, or the --config streams")
     parser.add_argument("--n-steps", type=int,
                         help="Default: 256, or the --config ppo.n_steps")
     parser.add_argument("--batch-size", type=int,

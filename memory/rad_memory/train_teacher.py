@@ -23,6 +23,8 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-root", default="datasets-fixed")
     parser.add_argument("--required-consecutive-evals", type=int, default=3)
+    parser.add_argument("--streams", type=int, default=1,
+                        help="Parallel streams per (task, seed) sharing one source learner")
     parser.add_argument("--env-id", default="MiniGrid-MemoryS13Random-v0")
     parser.add_argument("--size", type=int)
     parser.add_argument("--controlled", action="store_true")
@@ -49,7 +51,8 @@ def main() -> None:
                    total_timesteps=args.total_timesteps, evaluation_interval=args.checkpoint_interval,
                    evaluation_episodes=args.validation_episodes, minimum_success_rate=args.minimum_success_rate,
                    required_consecutive_evals=args.required_consecutive_evals,
-                   ppo_config=config_type(n_steps=args.n_steps, batch_size=args.batch_size))
+                   ppo_config=config_type(n_steps=args.n_steps, batch_size=args.batch_size),
+                   streams=args.streams)
         return
     if args.source_algorithm == "ppo":
         parser.error("Feed-forward PPO requires --manifest for fixed-task training")

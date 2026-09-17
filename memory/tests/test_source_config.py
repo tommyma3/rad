@@ -108,6 +108,14 @@ class ResolveSourceArgsTest(unittest.TestCase):
         _, _, budget = self._resolve([], {"source_seeds": 3})
         self.assertEqual(budget["source_seeds"], [3])
 
+    def test_streams_defaults_and_overrides(self):
+        _, _, budget = self._resolve([])
+        self.assertEqual(budget["streams"], 1)
+        _, _, budget = self._resolve([], {"streams": 3})
+        self.assertEqual(budget["streams"], 3)
+        _, _, budget = self._resolve(["--streams", "5"], {"streams": 3})
+        self.assertEqual(budget["streams"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()
