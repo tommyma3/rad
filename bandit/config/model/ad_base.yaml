@@ -11,7 +11,7 @@ weight_decay: 0.01
 beta1: 0.9
 beta2: 0.99
 batch_size: 64
-train_steps: 20000
+train_steps: 50000
 warmup_steps: 500
 gradient_accumulation_steps: 1
 max_grad_norm: 1.0

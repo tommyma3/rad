@@ -116,19 +116,39 @@ def summarize(rows):
     result = []
     for (method, distribution, delay), group in sorted(grouped.items()):
         item = {"method": method, "distribution": distribution, "delay": delay,
-                "rollouts": len(group), "training_runs": len({r["run_id"] for r in group})}
-        for metric in METRICS:
-            by_run = defaultdict(list)
+                "rollouts": len(group), "training_runs": len({r["run_id"] for r in group}),
+                "eval_seeds": len({r["eval_seed"] for r in group})}
+        run_ids = {r["run_id"] for r in group}
+        seeds = {r["eval_seed"] for r in group}
+        # Uncertainty hierarchy: training-run means when several checkpoints are
+        # present, else evaluation-seed means, else task variability for a single
+        # run and seed (the unit is labeled explicitly below).
+        if len(run_ids) > 1:
+            bucketed = defaultdict(list)
             for row in group:
-                by_run[row["run_id"]].append(row[metric])
-            # Multiple checkpoints: uncertainty over run means. Single checkpoint:
-            # uncertainty over tasks (does not estimate training-seed variability).
-            values = np.asarray([np.mean(v) for v in by_run.values()] if len(by_run) > 1 else next(iter(by_run.values())))
+                bucketed[row["run_id"]].append(row)
+            ci_unit = "training_run"
+        elif len(seeds) > 1:
+            bucketed = defaultdict(list)
+            for row in group:
+                bucketed[row["eval_seed"]].append(row)
+            ci_unit = "eval_seed"
+        else:
+            bucketed = {None: list(group)}
+            ci_unit = "task"
+        replications = list(bucketed.values())
+        for metric in METRICS:
+            values = np.asarray([np.mean([row[metric] for row in rep]) for rep in replications])
             item[metric] = float(values.mean())
-            item[f"{metric}_ci95"] = float(1.96 * values.std(ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
-        item["ci_unit"] = "training_run" if item["training_runs"] > 1 else "task"
+            item[f"{metric}_ci95"] = (float(1.96 * values.std(ddof=1) / np.sqrt(len(values)))
+                                      if len(values) > 1 else 0.0)
+        item["ci_unit"] = ci_unit
         item["reward_curve"] = np.mean([row["reward_curve"] for row in group], axis=0).tolist()
-        item["regret_curve"] = np.mean([row["regret_curve"] for row in group], axis=0).tolist()
+        replication_curves = np.asarray([np.mean([row["regret_curve"] for row in rep], axis=0)
+                                         for rep in replications])
+        item["regret_curve"] = replication_curves.mean(axis=0).tolist()
+        item["regret_curve_std"] = (replication_curves.std(axis=0, ddof=1) if len(replications) > 1
+                                    else np.zeros(replication_curves.shape[1])).tolist()
         result.append(item)
     # Optional normalization is reported alongside raw metrics, with undefined
     # denominators represented explicitly rather than divided by near-zero values.
@@ -167,7 +187,52 @@ def plot_summary(summary, output, reference_context):
     plt.close(fig)
 
 
-def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000,
+def plot_cumulative_regret(summary, output, pre_steps):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.transforms import blended_transform_factory
+
+    distributions = sorted({row["distribution"] for row in summary})
+    delays = sorted({row["delay"] for row in summary})
+    methods = sorted({row["method"] for row in summary})
+    total_pulls = max(len(row["regret_curve"]) for row in summary)
+    fig, axes = plt.subplots(len(distributions), len(delays),
+                             figsize=(3.6 * len(delays), 3.4 * len(distributions)), squeeze=False)
+    for column, delay in enumerate(delays):
+        for row_index, distribution in enumerate(distributions):
+            axis = axes[row_index, column]
+            for method in methods:
+                row = next((r for r in summary if r["method"] == method
+                            and r["distribution"] == distribution and r["delay"] == delay), None)
+                if row is None:
+                    continue
+                cumulative_regret = np.concatenate(([0.0], np.cumsum(row["regret_curve"])))
+                std = np.concatenate(([0.0], np.asarray(
+                    row.get("regret_curve_std") or np.zeros(len(row["regret_curve"])), dtype=float)))
+                x = np.arange(len(cumulative_regret))
+                (line,) = axis.plot(x, cumulative_regret, label=method)
+                axis.fill_between(x, cumulative_regret - std, cumulative_regret + std,
+                                  color=line.get_color(), alpha=0.15)
+            axis.set(xlabel="Arm pulls", ylabel="Cumulative expected regret", title=f"delay {delay}")
+            axis.grid(alpha=0.2)
+            axis.set_xlim(0, total_pulls)
+            axis.axvspan(0, pre_steps, color="tab:blue", alpha=0.05)
+            axis.axvspan(pre_steps, total_pulls, color="tab:orange", alpha=0.05)
+            axis.axvline(pre_steps, color="black", linestyle="--", linewidth=0.8)
+            label_transform = blended_transform_factory(axis.transData, axis.transAxes)
+            axis.text(pre_steps / 2, 0.96, "before delay", transform=label_transform,
+                      ha="center", va="top", fontsize=8)
+            axis.text((pre_steps + total_pulls) / 2, 0.96, "after delay", transform=label_transform,
+                      ha="center", va="top", fontsize=8)
+    axes[0, 0].legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(Path(output) / "cumulative_regret.png", dpi=180)
+    fig.savefig(Path(output) / "cumulative_regret.pdf")
+    plt.close(fig)
+
+
+def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000, eval_seeds=1,
                    distributions=("uniform",), delays=None, labels=None,
                    device="cpu", sample=True, include_baselines=True, shared_prefix=False,
                    reference_context=50, manifest_path=None):
@@ -177,6 +242,8 @@ def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000,
     delays = config["eval_delays"] if delays is None else delays
     if not delays or min(delays) < 0 or reference_context <= 0:
         raise ValueError("Delays must be nonnegative and reference_context positive")
+    if eval_seeds < 1:
+        raise ValueError("eval_seeds must be positive")
     if labels is not None and len(labels) != len(checkpoints):
         raise ValueError("Supply one label per checkpoint")
     if not checkpoints and not include_baselines:
@@ -185,21 +252,30 @@ def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000,
         raise ValueError("Duplicate delays would repeat identical evaluation rollouts")
     output.mkdir(parents=True, exist_ok=True)
     if manifest_path:
-        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        # An external manifest pins a single evaluation (its own seed); seed
+        # averaging requires generated manifests, so it is disabled on this path.
+        eval_seeds = 1
+        manifests = [json.loads(Path(manifest_path).read_text(encoding="utf-8"))]
+    else:
+        manifests = [make_eval_manifest(seed + offset, tasks, list(distributions), config)
+                     for offset in range(eval_seeds)]
+    for manifest in manifests:
         if (manifest["schema"] != SCHEMA or manifest["num_arms"] != config["num_arms"] or
                 manifest.get("reward_std") != config["reward_std"]):
             raise ValueError("Incompatible evaluation manifest")
-    else:
-        manifest = make_eval_manifest(seed, tasks, list(distributions), config)
-    if not manifest["records"]:
-        raise ValueError("Evaluation manifest is empty")
-    for record in manifest["records"]:
-        task = BanditTask.from_dict(record["task"])
-        if task.reward_std != config["reward_std"]:
-            raise ValueError("Evaluation task noise does not match configuration")
-    if len({r["task"]["task_id"] for r in manifest["records"]}) != len(manifest["records"]):
-        raise ValueError("Evaluation task IDs must be unique")
-    write_json(output / "manifest.json", manifest)
+        if not manifest["records"]:
+            raise ValueError("Evaluation manifest is empty")
+        for record in manifest["records"]:
+            task = BanditTask.from_dict(record["task"])
+            if task.reward_std != config["reward_std"]:
+                raise ValueError("Evaluation task noise does not match configuration")
+        if len({r["task"]["task_id"] for r in manifest["records"]}) != len(manifest["records"]):
+            raise ValueError("Evaluation task IDs must be unique")
+    write_json(output / "manifest.json", manifests[0])
+    if len(manifests) > 1:
+        write_json(output / "manifests.json", {"schema": SCHEMA,
+                                               "eval_seeds": [m["seed"] for m in manifests],
+                                               "manifests": manifests})
     methods = []
     provenance = []
     method_seeds = set()
@@ -225,34 +301,41 @@ def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000,
     write_json(output / "evaluation.json", {"config": config, "delays": delays,
                "protocol": "shared_ucb_prefix" if shared_prefix else "online",
                "sample_actions": sample, "reference_context": reference_context,
+               "eval_seeds": [m["seed"] for m in manifests],
                "checkpoints": provenance})
     rows = []
-    for method, run_id, model, training_seed in methods:
-        for delay in delays:
-            for record in manifest["records"]:
-                task = BanditTask.from_dict(record["task"])
-                policy = (ModelPolicy(model, record["policy_seed"], sample) if model is not None else
-                          RandomPolicy(config["num_arms"], record["policy_seed"]) if method == "Random" else None)
-                kwargs = {key: record[key] for key in ("reward_seed", "learner_seed", "distractor_seed")}
-                kwargs.update(delay=delay, pre_steps=config["pre_steps"], post_steps=config["post_steps"],
-                              exploration_coefficient=config["exploration_coefficient"])
-                prefix = generate_history(task, **kwargs)[0] if shared_prefix and policy is not None else None
-                history, _ = generate_history(task, policy=policy, prefix=prefix, **kwargs)
-                row = {"method": method, "run_id": run_id, "training_seed": training_seed,
-                       "task_id": task.task_id, "distribution": task.distribution, "delay": delay,
-                       **rollout_metrics(task, history, config["pre_steps"])}
-                rows.append(row)
-                with (output / "rollouts.jsonl").open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(row) + "\n")
-            print(f"Evaluated {method}: delay={delay}, tasks={len(manifest['records'])}", flush=True)
+    for manifest in manifests:
+        eval_seed = manifest["seed"]
+        for method, run_id, model, training_seed in methods:
+            for delay in delays:
+                for record in manifest["records"]:
+                    task = BanditTask.from_dict(record["task"])
+                    policy = (ModelPolicy(model, record["policy_seed"], sample) if model is not None else
+                              RandomPolicy(config["num_arms"], record["policy_seed"]) if method == "Random" else None)
+                    kwargs = {key: record[key] for key in ("reward_seed", "learner_seed", "distractor_seed")}
+                    kwargs.update(delay=delay, pre_steps=config["pre_steps"], post_steps=config["post_steps"],
+                                  exploration_coefficient=config["exploration_coefficient"])
+                    prefix = generate_history(task, **kwargs)[0] if shared_prefix and policy is not None else None
+                    history, _ = generate_history(task, policy=policy, prefix=prefix, **kwargs)
+                    row = {"method": method, "run_id": run_id, "training_seed": training_seed,
+                           "eval_seed": eval_seed, "task_id": task.task_id,
+                           "distribution": task.distribution, "delay": delay,
+                           **rollout_metrics(task, history, config["pre_steps"])}
+                    rows.append(row)
+                    with (output / "rollouts.jsonl").open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(row) + "\n")
+                seed_note = f" eval_seed={eval_seed}," if len(manifests) > 1 else ""
+                print(f"Evaluated {method}:{seed_note} delay={delay}, tasks={len(manifest['records'])}",
+                      flush=True)
     summary = summarize(rows)
     write_json(output / "summary.json", summary)
-    columns = [key for key in summary[0] if not key.endswith("_curve")]
+    columns = [key for key in summary[0] if not key.endswith(("_curve", "_curve_std"))]
     with (output / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(summary)
     plot_summary(summary, output, reference_context)
+    plot_cumulative_regret(summary, output, config["pre_steps"])
     return summary
 
 
@@ -264,6 +347,8 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--tasks", type=int, default=100)
     parser.add_argument("--seed", type=int, default=10000)
+    parser.add_argument("--eval_seeds", "--eval-seeds", type=int, default=5,
+                        help="Independent evaluation seed runs to average")
     parser.add_argument("--delays", type=int, nargs="+")
     parser.add_argument("--distributions", nargs="+", choices=("uniform",), default=["uniform"])
     parser.add_argument("--device", default="cpu")
@@ -274,11 +359,14 @@ def main():
     parser.add_argument("--manifest")
     parser.add_argument("--threads", type=int, default=4)
     args = parser.parse_args()
+    if args.eval_seeds < 1:
+        parser.error("eval_seeds must be positive")
     torch.set_num_threads(args.threads)
     config = get_config(f"config/env/{args.env}.yaml")
     config.update(get_config("config/algorithm/ucb.yaml"))
     evaluate_suite([project_path(p) for p in args.checkpoint], project_path(args.output), config,
-                   tasks=args.tasks, seed=args.seed, delays=args.delays, labels=args.labels,
+                   tasks=args.tasks, seed=args.seed, eval_seeds=args.eval_seeds,
+                   delays=args.delays, labels=args.labels,
                    distributions=args.distributions, device=args.device, sample=not args.greedy,
                    include_baselines=not args.no_baselines, shared_prefix=args.shared_prefix,
                    reference_context=args.reference_context,

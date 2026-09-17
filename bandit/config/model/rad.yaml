@@ -12,7 +12,7 @@ max_gradient_rounds: null
 ad_lr: 0.0003
 compression_lr: 0.0001
 latent_lr: 0.0003
-train_steps: 50000
+train_steps: 100000
 pretrain:
   train_steps: 20000
   warmup_steps: 500

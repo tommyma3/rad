@@ -171,8 +171,15 @@ uv run --project bandit python bandit/scripts/evaluate_delay_sweep.py --checkpoi
 
 UCB and random baselines are included by default. Independent uniform-mean tasks
 are evaluated using the same manifests, reward potential outcomes, and distractor
-streams for all methods and delays. Model actions are sampled by default; use
-`--greedy` for argmax evaluation. Use `--device cuda` on GPU.
+streams for all methods and delays within each evaluation seed run. Model actions
+are sampled by default; use `--greedy` for argmax evaluation. Use `--device cuda`
+on GPU.
+
+By default the evaluation is repeated for `--eval_seeds` independent seed runs
+(20; seeds `--seed`, `--seed`+1, ...), each with its own manifest of tasks and
+rollout streams, and metrics are averaged across all of them. Rollouts scale
+linearly with `--eval_seeds` times `--tasks`, so reduce both if runtime matters.
+Passing `--manifest` pins a single external manifest and disables seed averaging.
 
 Each policy generates its own Phase-I evidence in the main `online` protocol.
 For an additional controlled retention diagnostic:
@@ -184,17 +191,35 @@ uv run --project bandit python bandit/evaluate_rad.py --checkpoint runs/rad_s0/c
 This feeds the same UCB Phase-I history into each policy before the gap. It is
 recorded as a distinct protocol, not mixed with online results.
 
-Outputs include per-task JSONL, an evaluation manifest and checkpoint provenance,
-JSON/CSV summaries, and PNG/PDF delay curves. Metrics include pre/post return,
+Outputs include per-task JSONL, the evaluation manifest(s) and checkpoint provenance,
+JSON/CSV summaries, and PNG/PDF delay curves. With multiple seed runs, all
+manifests are stored in `manifests.json` (`manifest.json` remains the first seed's,
+so downstream `--manifest` reuse is unchanged). Metrics include pre/post return,
 first 1/5/10 post-gap returns, first optimal action, pseudo-regret, and compression
 counts/raw-history lengths at the first post-gap decision. Reward/regret curves
-are stored for all 100 genuine pulls. Normalized post-gap scores are optional
+are stored for all 100 genuine pulls. `cumulative_regret.png`/`.pdf` add one
+horizontally arranged panel per delay with each method's mean cumulative expected
+regret `sum(mu_best - mu_selected)` over genuine arm pulls, matching the convergence
+checker's cumulative regret curves, with a shaded standard deviation band across
+evaluation seed runs. A dashed line at the 50th pull splits each
+panel into shaded "before delay" (pre-gap) and "after delay" (post-gap) regions. Normalized post-gap scores are optional
 derived values; undefined denominators produce null, while raw metrics remain.
 
-Supply multiple checkpoints with the same label to aggregate training runs.
-Approximate 95% intervals use run means when several runs are present; for a
-single run, they use task variability and are explicitly labeled `ci_unit=task`.
-These single-run intervals do not measure training-seed uncertainty.
+Supply one checkpoint per training seed with the same label to aggregate training
+runs — for example, after training AD-short and RAD under seeds s0 and s1:
+
+```powershell
+uv run --project bandit python bandit/scripts/evaluate_delay_sweep.py --checkpoint runs/ad_short_s0/checkpoint-0020000 runs/ad_short_s1/checkpoint-0020000 runs/rad_s0/checkpoint-0020000 runs/rad_s1/checkpoint-0020000 --labels AD-short AD-short RAD RAD --output results/delay_sweep --tasks 100 --delays 0 25 50 100 200
+```
+
+Metrics and curves are then averaged across training seeds, with evaluation
+seed runs nested inside each training run. Approximate 95% intervals use
+training-run means when several runs are present,
+else evaluation-seed means when several seed runs are used, else task variability
+for a single run and seed; the unit is always labeled explicitly via `ci_unit`.
+Likewise, the cumulative regret std band spans the training-run mean curves when
+several are present, else the evaluation-seed mean curves.
+Intervals over a single run and seed do not measure training-seed uncertainty.
 
 ## Check UCB convergence
 
