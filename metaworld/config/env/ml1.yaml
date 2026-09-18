@@ -1,5 +1,5 @@
 env: metaworld
-task: stick-push-v3
+task: hammer-v3
 
 mw_seed: 0
 horizon: 100
