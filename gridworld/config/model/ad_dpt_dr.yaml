@@ -1,0 +1,11 @@
+include: config/model/ad_dr.yaml
+
+model: AD_DPT
+tokenization: gridworld-packed-transition-query-last-v1
+# 79 completed transitions + one query, versus 3 * 80 SAR slots in AD.
+# n_transit remains inherited metadata; new policy capacity is explicit below.
+policy_token_budget: 80
+lengths_per_batch: 4
+mixed_precision: fp16
+torch_compile_modules:
+  - ad_transformer

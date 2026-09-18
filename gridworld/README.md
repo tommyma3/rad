@@ -150,3 +150,10 @@ gridworld/.venv/Scripts/python.exe tests/test_gridworld_baselines.py -v
 These checks cover token causality, gradients, oracle labels, task mapping,
 episode handling, strict checkpoint round trips, training/save/resume, and
 five-method plotting. They do not establish convergence or multi-GPU correctness.
+
+## Darkroom tokenization ablation
+
+See [TOKENIZATION_ABLATION.md](TOKENIZATION_ABLATION.md) for the isolated
+`AD_DPT` and `RAD_DPT` query-last variants, variable-length RAD sampling,
+pretraining/training commands, and the four-method evaluator. Existing AD/RAD
+training and inference entrypoints remain unchanged.
