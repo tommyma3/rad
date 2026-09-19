@@ -3,6 +3,10 @@
 Checkpoints are discovered automatically under ``--runs_dir``: each training
 run contributes its max-iteration checkpoint, runs named ``<family>_s<seed>``
 share one method label, and the summary averages over the runs in each family.
+
+Rollout results are cached under ``--cache_dir`` per method, evaluation seed,
+and delay, so rerunning after plotting-only changes reuses cached rollouts and
+regenerates just the summary and figures (pass ``--force`` to reevaluate).
 """
 import argparse
 from pathlib import Path
@@ -35,6 +39,9 @@ def main():
     parser.add_argument("--shared_prefix", action="store_true")
     parser.add_argument("--reference_context", type=int, default=50)
     parser.add_argument("--manifest")
+    parser.add_argument("--cache_dir", "--cache-dir", default="results/eval_cache",
+                        help="Rollout cache directory; reruns reuse cached blocks and only regenerate outputs")
+    parser.add_argument("--force", action="store_true", help="Recompute cached evaluations")
     parser.add_argument("--threads", type=int, default=4)
     args = parser.parse_args()
     if args.eval_seeds < 1:
@@ -60,7 +67,8 @@ def main():
                    distributions=args.distributions, device=args.device, sample=not args.greedy,
                    include_baselines=not args.no_baselines, shared_prefix=args.shared_prefix,
                    reference_context=args.reference_context,
-                   manifest_path=project_path(args.manifest) if args.manifest else None)
+                   manifest_path=project_path(args.manifest) if args.manifest else None,
+                   cache_dir=project_path(args.cache_dir), force=args.force)
 
 
 if __name__ == "__main__":

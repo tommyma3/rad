@@ -438,7 +438,7 @@ def configure_plot_style() -> None:
             "font.size": 10,
             "axes.labelsize": 11,
             "axes.titlesize": 12,
-            "legend.fontsize": 10,
+            "legend.fontsize": 11,
             "xtick.labelsize": 9,
             "ytick.labelsize": 9,
             "axes.spines.top": False,
@@ -538,7 +538,7 @@ def plot_environment(
     if not envs:
         return []
 
-    fig, axes = plt.subplots(1, len(envs), figsize=(6.4 * len(envs), 4.4), squeeze=False)
+    fig, axes = plt.subplots(1, len(envs), figsize=(5.4 * len(envs), 4.6), squeeze=False)
     saved_paths = []
     legend_handles = {}
 
@@ -566,8 +566,8 @@ def plot_environment(
             legend_handles.setdefault(method, line)
 
         env_label = ENV_LABELS[env]
-        ax.set_title(f'{env_label} Evaluation Performance')
-        ax.set_xlabel('Episode (in-context evaluation / source RL training)')
+        ax.set_title(f'{env_label}')
+        ax.set_xlabel('Episode')
         ax.set_ylabel('Average episode reward')
         ax.set_xlim(1, max(2, max_episodes))
         ax.set_ylim(0, max_upper * 1.08 if max_upper > 0 else 1)
@@ -578,7 +578,7 @@ def plot_environment(
         return saved_paths
 
     handles = [legend_handles[method] for method in ('RAD', 'AD', 'DPT', 'IDT', 'SOURCE') if method in legend_handles]
-    fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.01),
+    fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.05),
                ncol=len(handles), frameon=False)
     fig.tight_layout(rect=(0, 0.12, 1, 1))
 

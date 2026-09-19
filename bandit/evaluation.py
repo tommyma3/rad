@@ -2,6 +2,7 @@
 import argparse
 from collections import defaultdict
 import csv
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -283,29 +284,24 @@ def plot_cumulative_regret(summary, output, pre_steps):
                     continue
                 cumulative = np.concatenate(([0.0], np.cumsum(row["regret_curve"])))
                 curves[method] = cumulative
-                ymax = max(ymax, float(cumulative[pre_steps:].max()))
+                ymax = max(ymax, float(cumulative.max()))
             if curves:
                 panels[(distribution, delay)] = curves
     with plt.rc_context(PAPER_RC):
         fig, axes = plt.subplots(len(distributions), len(delays),
-                                 figsize=(1.55 * len(delays) + 0.9, 1.9 * len(distributions) + 0.6),
+                                 figsize=(1.9 * len(delays) + 0.9, 1.9 * len(distributions) + 0.6),
                                  squeeze=False, layout="constrained")
         handles = {}
         for column, delay in enumerate(delays):
             for row_index, distribution in enumerate(distributions):
                 axis = axes[row_index, column]
                 curves = panels.get((distribution, delay), {})
-                # Every method experiences the same gap-free pre-gap rollout, so
-                # a single shared curve keeps the pre-gap region readable.
-                pre = np.mean([c[: pre_steps + 1] for c in curves.values()], axis=0)
-                (pre_line,) = axis.plot(np.arange(pre_steps + 1), pre, color="0.15", linewidth=1.2)
-                handles["pre-gap (shared)"] = pre_line
                 for method in order:
                     if method not in curves:
                         continue
                     cumulative = curves[method]
-                    (line,) = axis.plot(np.arange(pre_steps, len(cumulative)),
-                                        cumulative[pre_steps:], **{**styles[method], "marker": ""})
+                    (line,) = axis.plot(np.arange(len(cumulative)), cumulative,
+                                        **{**styles[method], "marker": ""})
                     handles[method] = line
                 axis.axvline(pre_steps, color="black", linestyle="--", linewidth=0.8)
                 axis.set(xlabel="Arm pulls", title=f"delay {delay}", xlim=(0, total_pulls),
@@ -318,7 +314,7 @@ def plot_cumulative_regret(summary, output, pre_steps):
                           ha="center", va="top", fontsize=7)
                 axis.text((pre_steps + total_pulls) / 2, 0.96, "after delay", transform=label_transform,
                           ha="center", va="top", fontsize=7)
-        legend_entries = ["pre-gap (shared)"] + [m for m in order if m in handles]
+        legend_entries = [m for m in order if m in handles]
         fig.legend([handles[m] for m in legend_entries], legend_entries,
                    loc="outside lower center", ncol=len(legend_entries), frameon=False)
         fig.savefig(Path(output) / "cumulative_regret.png", dpi=300)
@@ -364,13 +360,39 @@ def discover_run_checkpoints(runs_dir):
     return dict(discovered), skipped
 
 
+def _cache_protocol(config, manifest, delay, sample, shared_prefix):
+    """Everything that determines rollout outcomes for one cache block.
+
+    Plotting-only settings (e.g. reference_context) stay out so restyling
+    figures does not invalidate cached evaluations.
+    """
+    return {"schema": SCHEMA, "num_arms": manifest["num_arms"], "reward_std": manifest["reward_std"],
+            "tasks": manifest["tasks_per_distribution"], "distributions": list(manifest["distributions"]),
+            "manifest_seed": manifest["seed"], "delay": delay,
+            "pre_steps": config["pre_steps"], "post_steps": config["post_steps"],
+            "exploration_coefficient": config["exploration_coefficient"],
+            "sample": sample, "shared_prefix": shared_prefix}
+
+
+def _cache_file_name(method, run_id, eval_seed, delay, protocol):
+    digest = hashlib.sha256(json.dumps(protocol, sort_keys=True).encode()).hexdigest()[:12]
+    safe_label = re.sub(r"[^0-9A-Za-z_.-]+", "_", method)
+    key = run_id[:12] if run_id else "baseline"
+    return f"{safe_label}__{key}__seed{eval_seed}__delay{delay}__{digest}.json"
+
+
 def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000, eval_seeds=1,
                    distributions=("uniform",), delays=None, labels=None,
                    device="cpu", sample=True, include_baselines=True, shared_prefix=False,
-                   reference_context=50, manifest_path=None):
+                   reference_context=50, manifest_path=None, cache_dir=None, force=False):
     output = Path(output)
+    cache_dir = Path(cache_dir) if cache_dir is not None else None
     if output.exists() and any(output.iterdir()):
-        raise FileExistsError(f"Evaluation output must be empty: {output}")
+        if cache_dir is None or not (output / "evaluation.json").exists():
+            raise FileExistsError(f"Evaluation output must be empty: {output}")
+        reuse_output = True
+    else:
+        reuse_output = False
     delays = config["eval_delays"] if delays is None else delays
     if not delays or min(delays) < 0 or reference_context <= 0:
         raise ValueError("Delays must be nonnegative and reference_context positive")
@@ -430,16 +452,45 @@ def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000, eval_s
         methods.append((label, run_id, model, model_config["seed"]))
         provenance.append({"method": label, "run_id": run_id, "checkpoint": str(file.resolve()),
                            "config": model_config, "step": payload["step"]})
-    write_json(output / "evaluation.json", {"config": config, "delays": delays,
-               "protocol": "shared_ucb_prefix" if shared_prefix else "online",
-               "sample_actions": sample, "reference_context": reference_context,
-               "eval_seeds": [m["seed"] for m in manifests],
-               "checkpoints": provenance})
+    evaluation = {"config": config, "delays": delays,
+                  "protocol": "shared_ucb_prefix" if shared_prefix else "online",
+                  "sample_actions": sample, "reference_context": reference_context,
+                  "eval_seeds": [m["seed"] for m in manifests],
+                  "checkpoints": provenance}
+    if reuse_output:
+        previous = json.loads((output / "evaluation.json").read_text(encoding="utf-8"))
+        # reference_context only rescales the delay-sweep axes; rollouts and
+        # summaries are unaffected, so replotting may reuse the output.
+        plotting_keys = ("reference_context",)
+        compatible = {key: value for key, value in evaluation.items() if key not in plotting_keys}
+        previous_compatible = {key: value for key, value in previous.items() if key not in plotting_keys}
+        if previous_compatible != compatible:
+            raise FileExistsError(f"Evaluation output {output} holds a different evaluation;"
+                                  " choose a new --output")
+        (output / "rollouts.jsonl").unlink(missing_ok=True)
+        (output / "manifests.json").unlink(missing_ok=True)
+    write_json(output / "evaluation.json", evaluation)
     rows = []
     for manifest in manifests:
         eval_seed = manifest["seed"]
         for method, run_id, model, training_seed in methods:
             for delay in delays:
+                cache_path = None
+                if cache_dir is not None:
+                    protocol = _cache_protocol(config, manifest, delay, sample, shared_prefix)
+                    cache_path = cache_dir / _cache_file_name(method, run_id, eval_seed, delay, protocol)
+                    if cache_path.exists() and not force:
+                        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                        if cached["protocol"] != protocol:
+                            raise ValueError(f"Cache entry does not match its protocol: {cache_path}")
+                        rows.extend(cached["rows"])
+                        with (output / "rollouts.jsonl").open("a", encoding="utf-8") as handle:
+                            for row in cached["rows"]:
+                                handle.write(json.dumps(row) + "\n")
+                        print(f"Loaded {method}: eval_seed={eval_seed}, delay={delay} from cache",
+                              flush=True)
+                        continue
+                block_rows = []
                 for record in manifest["records"]:
                     task = BanditTask.from_dict(record["task"])
                     policy = (ModelPolicy(model, record["policy_seed"], sample) if model is not None else
@@ -454,8 +505,12 @@ def evaluate_suite(checkpoints, output, config, *, tasks=100, seed=10000, eval_s
                            "distribution": task.distribution, "delay": delay,
                            **rollout_metrics(task, history, config["pre_steps"])}
                     rows.append(row)
+                    block_rows.append(row)
                     with (output / "rollouts.jsonl").open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(row) + "\n")
+                if cache_path is not None:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    write_json(cache_path, {"protocol": protocol, "rows": block_rows})
                 seed_note = f" eval_seed={eval_seed}," if len(manifests) > 1 else ""
                 print(f"Evaluated {method}:{seed_note} delay={delay}, tasks={len(manifest['records'])}",
                       flush=True)
@@ -489,6 +544,9 @@ def main():
     parser.add_argument("--shared_prefix", action="store_true")
     parser.add_argument("--reference_context", type=int, default=50)
     parser.add_argument("--manifest")
+    parser.add_argument("--cache_dir", "--cache-dir", default=None,
+                        help="Directory caching evaluation rollouts per method, eval seed, and delay")
+    parser.add_argument("--force", action="store_true", help="Recompute cached evaluations")
     parser.add_argument("--threads", type=int, default=4)
     args = parser.parse_args()
     if args.eval_seeds < 1:
@@ -502,7 +560,9 @@ def main():
                    distributions=args.distributions, device=args.device, sample=not args.greedy,
                    include_baselines=not args.no_baselines, shared_prefix=args.shared_prefix,
                    reference_context=args.reference_context,
-                   manifest_path=project_path(args.manifest) if args.manifest else None)
+                   manifest_path=project_path(args.manifest) if args.manifest else None,
+                   cache_dir=project_path(args.cache_dir) if args.cache_dir else None,
+                   force=args.force)
 
 
 if __name__ == "__main__":
