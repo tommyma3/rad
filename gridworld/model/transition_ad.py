@@ -23,8 +23,8 @@ TOKENIZATION = 'gridworld-packed-transition-query-last-v1'
 def validate_config(config):
     if config.get('tokenization') != TOKENIZATION:
         raise ValueError(f'Tokenization ablations require tokenization={TOKENIZATION}')
-    if config.get('env') != 'darkroom' or config.get('dynamics', False):
-        raise ValueError('This ablation supports action-only Darkroom training')
+    if config.get('env') not in ('darkroom', 'dktd') or config.get('dynamics', False):
+        raise ValueError('This ablation supports action-only Darkroom and DKTD training')
     if int(config['policy_token_budget']) < 2:
         raise ValueError('policy_token_budget must reserve a query and history')
 

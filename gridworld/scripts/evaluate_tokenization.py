@@ -1,4 +1,4 @@
-"""Compare explicit AD, RAD, AD_DPT and RAD_DPT checkpoints on Darkroom.
+"""Compare explicit AD, RAD, AD_DPT and RAD_DPT checkpoints on Darkroom or DKTD.
 
 Example (run from gridworld): python scripts/evaluate_tokenization.py
   --checkpoint AD=runs/AD-darkroom-seed0 --checkpoint RAD=runs/RAD-darkroom-seed0
@@ -32,6 +32,7 @@ from utils import normalize_compiled_state_dict
 
 
 LABELS = {'AD': 'AD', 'RAD': 'RAD', 'AD_DPT': 'AD (DPT-tokenized)', 'RAD_DPT': 'RAD (DPT-tokenized)'}
+ENV_LABELS = {'darkroom': 'Darkroom', 'dktd': 'Dark Key-to-Door'}
 
 
 def resolve_checkpoint(path):
@@ -47,16 +48,20 @@ def resolve_checkpoint(path):
     return path
 
 
-def split_audit(config, collection_seed):
+def split_audit(config, collection_seed=None):
     """Report legacy group selection accurately without migrating any datasets."""
-    count = config['grid_size'] ** 2
+    power = {'darkroom': 2, 'dktd': 4}[config['env']]
+    if collection_seed is None:
+        collection_seed = config.get('collection_env_split_seed', {'darkroom': 0, 'dktd': 2}[config['env']])
+    count = config['grid_size'] ** power
     ids = list(range(count))
     random.Random(config['env_split_seed']).shuffle(ids)
     split = round(count * config['train_env_ratio'])
-    order = collection_task_ids(config['grid_size'], 2, collection_seed)
+    order = collection_task_ids(config['grid_size'], power, collection_seed)
     train_tasks = {order[group] for group in ids[:split]}
     test_tasks = set(ids[split:])
-    return {'collection_env_split_seed': collection_seed,
+    return {'collection_env_split_seed': collection_seed, 'task_count': count,
+            'task_id_kind': 'key_door_pair' if config['env'] == 'dktd' else 'goal',
             'training_goal_ids': sorted(train_tasks), 'evaluation_goal_ids': sorted(test_tasks),
             'overlap_goal_ids': sorted(train_tasks & test_tasks)}
 
@@ -68,7 +73,8 @@ def main():
     parser.add_argument('--eval-seeds', type=int, nargs='+', default=[0, 1, 2, 3, 4])
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--device', choices=['cpu', 'cuda'], default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--collection-env-split-seed', type=int, default=0)
+    parser.add_argument('--collection-env-split-seed', type=int,
+                        help='Override collection ordering; defaults to checkpoint metadata, then Darkroom=0 / DKTD=2')
     parser.add_argument('--greedy', action='store_true')
     parser.add_argument('--allow-partial', action='store_true', help='Allow fewer than four methods for smoke tests')
     args = parser.parse_args()
@@ -89,11 +95,11 @@ def main():
     for method, path in entries:
         checkpoint = torch.load(path, map_location='cpu', weights_only=False)
         config = dict(checkpoint['config'])
-        if config['model'] != method or config['env'] != 'darkroom' or checkpoint.get('phase', 'train') != 'train':
-            raise ValueError(f'{path} is not a {method} Darkroom policy-training checkpoint')
-        signature = tuple(config[key] for key in ('grid_size', 'horizon', 'env_split_seed', 'train_env_ratio'))
+        if config['model'] != method or config['env'] not in ENV_LABELS or checkpoint.get('phase', 'train') != 'train':
+            raise ValueError(f'{path} is not a {method} Darkroom/DKTD policy-training checkpoint')
+        signature = tuple(config[key] for key in ('env', 'grid_size', 'horizon', 'env_split_seed', 'train_env_ratio'))
         if environment is not None and signature != environment:
-            raise ValueError('All checkpoints must use the same Darkroom task split and horizon')
+            raise ValueError('All checkpoints must use the same environment, task split, and horizon')
         environment = signature
         seed_key = (method, config.get('seed', 42), config['env_split_seed'])
         if seed_key in seen:
@@ -108,7 +114,7 @@ def main():
             model, config, checkpoint = load_model(path, device)
         audit = split_audit(config, args.collection_env_split_seed)
         if audit['overlap_goal_ids']:
-            print(f"{method}: legacy source-group selection overlaps {len(audit['overlap_goal_ids'])} evaluation goals; see metrics.json", flush=True)
+            print(f"{method}: legacy source-group selection overlaps {len(audit['overlap_goal_ids'])} evaluation tasks; see metrics.json", flush=True)
         samples, elapsed, compression_counts = [], [], []
         if device.type == 'cuda':
             torch.cuda.reset_peak_memory_stats(device)
@@ -133,7 +139,7 @@ def main():
         identity = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:12]
         artifact = args.output_dir / f'{method}-{identity}.npz'
         np.savez_compressed(artifact, reward_episode=rewards, eval_seeds=args.eval_seeds)
-        result = {'method': method, 'checkpoint': str(path.resolve()), 'training_seed': config.get('seed', 42),
+        result = {'method': method, 'env': config['env'], 'checkpoint': str(path.resolve()), 'training_seed': config.get('seed', 42),
                   'step': checkpoint.get('step'), 'artifact': str(artifact.resolve()),
                   'mean_episode_return': float(rewards.mean()),
                   'cumulative_reward': float(rewards.sum(-1).mean()),
@@ -164,7 +170,7 @@ def main():
             axis.fill_between(episodes, mean - half_width, mean + half_width, color=line.get_color(), alpha=.15)
         aggregates[method] = {'training_seeds': len(values), 'episode_mean': mean.tolist(),
                               'episode_95pct_half_width': half_width.tolist()}
-    axis.set(xlabel='Episode', ylabel='Episode return', title='Darkroom tokenization ablation')
+    axis.set(xlabel='Episode', ylabel='Episode return', title=f'{ENV_LABELS[environment[0]]} tokenization ablation')
     axis.legend()
     figure.tight_layout()
     figure.savefig(args.output_dir / 'comparison.png', dpi=200)

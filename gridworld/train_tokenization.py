@@ -55,9 +55,26 @@ def load_pretraining(model, checkpoint):
                                              if key.startswith(prefix)}, strict=True)
 
 
+def load_experiment_config(preset=None, env=None):
+    """Select environment defaults before overlaying the isolated model preset."""
+    preset = preset or ('rad_dpt_dktd' if env == 'dktd' else 'rad_dpt_dr')
+    path = Path(preset) if Path(preset).suffix in ('.yaml', '.yml') else Path(f'config/model/{preset}.yaml')
+    model_config = get_config(path)
+    if env is not None and model_config.get('env', env) != env:
+        raise ValueError('--env disagrees with the model preset environment')
+    env = env or model_config.get('env', 'darkroom')
+    if env not in ('darkroom', 'dktd'):
+        raise ValueError(f'Unsupported tokenization-ablation environment: {env}')
+    config = get_config(f'config/env/{env}.yaml')
+    config.update(get_config(f'config/algorithm/ppo_{env}.yaml'))
+    config.update(model_config)
+    return config
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default='rad_dpt_dr', help='Preset name or YAML path')
+    parser.add_argument('--config', help='Preset name or YAML path; defaults to the environment RAD_DPT preset')
+    parser.add_argument('--env', choices=['darkroom', 'dktd'], help='Defaults to the preset environment, or Darkroom')
     parser.add_argument('--phase', choices=['train', 'pretrain'])
     parser.add_argument('--traj-dir', help='Source histories; resume defaults to the saved directory')
     parser.add_argument('--runs-root', default='./runs/tokenization')
@@ -74,13 +91,12 @@ def main():
         phase = checkpoint['phase']
         if args.phase not in (None, phase) or args.seed not in (None, config['seed']):
             raise ValueError('Resume cannot change phase or seed')
+        if args.env not in (None, config['env']):
+            raise ValueError('Resume cannot change environment')
         if args.pretrain_ckpt or args.updates is not None:
             raise ValueError('Resume restores the saved update budget and initialization')
     else:
-        config = get_config('config/env/darkroom.yaml')
-        config.update(get_config('config/algorithm/ppo_darkroom.yaml'))
-        path = Path(args.config) if Path(args.config).suffix in ('.yaml', '.yml') else Path(f'config/model/{args.config}.yaml')
-        config.update(get_config(path))
+        config = load_experiment_config(args.config, args.env)
         config['seed'] = args.seed if args.seed is not None else config.get('seed', 42)
         phase = args.phase or 'train'
     validate_config(config)
@@ -109,7 +125,7 @@ def main():
     config.update(device=accelerator.device, mixed_precision=precision, traj_dir=str(Path(traj_dir).resolve()),
                   effective_total_updates=total)
     set_seed(config['seed'])
-    run_dir = args.resume.parent if checkpoint else Path(args.runs_root) / f"{method}{'-pretrain' if pretrain else ''}-darkroom-seed{config['seed']}"
+    run_dir = args.resume.parent if checkpoint else Path(args.runs_root) / f"{method}{'-pretrain' if pretrain else ''}-{config['env']}-seed{config['seed']}"
     if not checkpoint and run_dir.exists() and any(run_dir.iterdir()):
         raise FileExistsError(f'{run_dir} is nonempty; use --resume or another --runs-root')
     dataset = TransitionDataset(config, traj_dir, 'train', settings['train_n_stream'], config['train_source_timesteps'])

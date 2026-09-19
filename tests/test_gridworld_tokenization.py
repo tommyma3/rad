@@ -1,7 +1,9 @@
 """Contract and end-to-end checks for isolated query-last tokenization variants."""
 
 import copy
+from contextlib import chdir
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -25,7 +27,7 @@ from env import make_env
 from model import AD, RAD, MODEL
 from model.transition_ad import ADTransition, RADTransition, MemorySchedule, TOKENIZATION
 from transition_dataset import TransitionDataset, EndpointBatchSampler, exact_length_collate
-from train_tokenization import load_pretraining
+from train_tokenization import load_pretraining, load_experiment_config
 
 
 def config(method='RAD_DPT', **changes):
@@ -236,15 +238,94 @@ class TokenizationTests(unittest.TestCase):
                 self.assertGreater(output['total_compressions'], 0)
 
     def test_training_checkpoint_resume_and_evaluation_cli(self):
+        self._exercise_training_cli('darkroom')
+
+    def test_dktd_training_checkpoint_resume_and_evaluation_cli(self):
+        self._exercise_training_cli('dktd')
+
+    def test_dktd_presets_and_pretraining_window(self):
+        with chdir(ROOT / 'gridworld'):
+            ad = load_experiment_config('ad_dpt_dktd')
+            rad = load_experiment_config(env='dktd')
+            darkroom = load_experiment_config()
+            self.assertEqual((ad['env'], ad['horizon'], ad['policy_token_budget']), ('dktd', 50, 100))
+            self.assertEqual(rad['env_split_seed'], 2)
+            self.assertEqual(rad['collection_env_split_seed'], 2)
+            self.assertEqual(rad['n_compress_tokens'], 60)
+            self.assertEqual(rad['pretrain']['pretrain_timesteps'], 50000)
+            self.assertEqual(darkroom['env'], 'darkroom')
+            with self.assertRaisesRegex(ValueError, 'disagrees'):
+                load_experiment_config('ad_dpt_dktd', 'darkroom')
+        schedule = MemorySchedule(rad['policy_token_budget'], rad['n_compress_tokens'], rad['short_memory_keep'])
+        self.assertEqual(schedule.state_after(71), (0, 71))
+        self.assertEqual(schedule.state_after(72), (1, 10))
+        self.assertEqual(schedule.state_after(73), (1, 11))
+        self.assertEqual(schedule.state_after(74), (2, 10))
+        fake_data = type('HistoryShape', (), {'seq_length': 1000})()
+        sampler = EndpointBatchSampler(fake_data, rad, 4, 0, 1, pretrain=True)
+        self.assertEqual(sampler.length_groups(0)[0], {'pretrain': [72]})
+
+    def test_dktd_reader_and_key_door_episode_contract(self):
+        cfg = config(env='dktd', env_split_seed=2, collection_env_split_seed=2)
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = write_history(directory, cfg)
+            original = path.read_bytes()
+            legacy = ADDataset(cfg, directory)
+            dataset = TransitionDataset(cfg, directory)
+            np.testing.assert_array_equal(dataset.states, legacy.states)
+            np.testing.assert_array_equal(dataset.actions, legacy.actions)
+            np.testing.assert_array_equal(dataset.rewards, legacy.rewards)
+            self.assertEqual(dataset.n_histories, 8)  # Half of 2**4 key/door pairs.
+            self.assertEqual(dataset[(0, 0, 3)]['query_states'].shape, (2,))
+            self.assertEqual(original, path.read_bytes())
+        for cls in (ADTransition, RADTransition):
+            model = cls(cfg).eval()
+            queries, rewards, terminal = [], [], []
+            original_policy = model.policy_logits
+            original_tokens = model.transition_tokens
+
+            def policy(query, memory):
+                queries.append(query.clone())
+                logits = original_policy(query, memory)
+                forced = torch.full_like(logits, -100.)
+                forced[:, (1, 3, 4, 4)[(len(queries) - 1) % 4]] = 100.
+                return forced
+
+            def embed(states, actions, reward, next_states):
+                rewards.append(reward.clone())
+                terminal.append(next_states.clone())
+                return original_tokens(states, actions, reward, next_states)
+
+            model.policy_logits = policy
+            model.transition_tokens = embed
+            envs = DummyVecEnv([make_env(cfg, key=np.array([0, 1]), goal=np.array([0, 0]))])
+            try:
+                output = model.evaluate_in_context(envs, 12, sample=False)
+            finally:
+                envs.close()
+            np.testing.assert_array_equal(output['reward_episode'], [[2., 2., 2.]])
+            np.testing.assert_array_equal(torch.cat(rewards, 1).numpy(), [[1., 1., 0., 0.] * 3])
+            torch.testing.assert_close(queries[4], torch.tensor([[1., 1.]]))
+            self.assertEqual(terminal[3].tolist(), [[[0, 0]]])
+            if cls is RADTransition:
+                self.assertEqual(output['total_compressions'], model.schedule.state_after(12)[0])
+        checkpoint = {'config': config(), 'phase': 'pretrain', 'model': RADTransition(config()).state_dict()}
+        with self.assertRaisesRegex(ValueError, 'mismatch: env'):
+            load_pretraining(RADTransition(cfg), checkpoint)
+
+    def _exercise_training_cli(self, env):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cfg = config(max_context_length=20, train_n_stream=1, train_source_timesteps=12,
+            cfg = config(env=env, env_split_seed=2 if env == 'dktd' else 0,
+                         max_context_length=20, train_n_stream=1, train_source_timesteps=12,
                          train_timesteps=2, train_batch_size=4, test_batch_size=4,
                          num_workers=0, torch_compile=False, num_warmup_steps=1,
                          summary_interval=1, eval_interval=1, ckpt_interval=1, progress_interval=1,
                          lr=.001, beta1=.9, beta2=.99, weight_decay=.01,
                          pretrain=dict(n_transit=4, pretrain_timesteps=2, pretrain_batch_size=4,
                                        pretrain_warmup_steps=1, pretrain_lr=.001, num_workers=0))
+            if env == 'dktd':
+                del cfg['pretrain']['n_transit']  # Use the inherited DKTD window.
             write_history(root, cfg)
             base_command = [sys.executable] + (['-S'] if sys.flags.no_site else [])
             def run(arguments):
@@ -262,9 +343,9 @@ class TokenizationTests(unittest.TestCase):
                 extra = []
                 if method == 'RAD_DPT':
                     run(common + ['--phase', 'pretrain'])
-                    extra = ['--pretrain-ckpt', str(root / 'runs' / f'{method}-pretrain-darkroom-seed17' / 'ckpt-2.pt')]
+                    extra = ['--pretrain-ckpt', str(root / 'runs' / f'{method}-pretrain-{env}-seed17' / 'ckpt-2.pt')]
                 run(common + extra)
-                trained = root / 'runs' / f'{method}-darkroom-seed17'
+                trained = root / 'runs' / f'{method}-{env}-seed17'
                 resumed = root / f'{method}-resume'
                 resumed.mkdir()
                 shutil.copyfile(trained / 'ckpt-1.pt', resumed / 'ckpt-1.pt')
@@ -283,6 +364,12 @@ class TokenizationTests(unittest.TestCase):
                  '--eval-seeds', '0', '--device', 'cpu', '--output-dir', str(root / 'comparison')])
             self.assertTrue((root / 'comparison' / 'comparison.png').is_file())
             self.assertTrue((root / 'comparison' / 'metrics.json').is_file())
+            report = json.loads((root / 'comparison' / 'metrics.json').read_text())
+            for result in report['runs']:
+                self.assertEqual(result['env'], env)
+                audit = result['split_audit']
+                self.assertEqual(audit['task_count'], cfg['grid_size'] ** (4 if env == 'dktd' else 2))
+                self.assertEqual(audit['collection_env_split_seed'], 2 if env == 'dktd' else 0)
 
 
 if __name__ == '__main__':

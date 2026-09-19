@@ -151,9 +151,9 @@ These checks cover token causality, gradients, oracle labels, task mapping,
 episode handling, strict checkpoint round trips, training/save/resume, and
 five-method plotting. They do not establish convergence or multi-GPU correctness.
 
-## Darkroom tokenization ablation
+## Darkroom and DKTD tokenization ablation
 
 See [TOKENIZATION_ABLATION.md](TOKENIZATION_ABLATION.md) for the isolated
-`AD_DPT` and `RAD_DPT` query-last variants, variable-length RAD sampling,
+`AD_DPT` and `RAD_DPT` query-last variants in both environments, variable-length RAD sampling,
 pretraining/training commands, and the four-method evaluator. Existing AD/RAD
 training and inference entrypoints remain unchanged.

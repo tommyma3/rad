@@ -89,7 +89,7 @@ class EndpointBatchSampler(Sampler):
 
     def length_groups(self, step):
         if self.pretrain:
-            length = int(self.config['pretrain']['n_transit'])
+            length = int(self.config['pretrain'].get('n_transit', self.config['n_transit']))
             if not 1 <= length < self.dataset.seq_length:
                 raise ValueError('Pretraining window must fit the source history')
             return {'pretrain': [length]}, {'pretrain': 1.}

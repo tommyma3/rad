@@ -1,4 +1,4 @@
-# Darkroom tokenization ablation
+# Darkroom and Dark Key-to-Door tokenization ablation
 
 This experiment adds `AD_DPT` and `RAD_DPT`. Existing `AD`, `RAD`, `DPT`, and
 `IDT` classes, model registration, datasets, training entrypoints, inference
@@ -24,7 +24,8 @@ this experiment deliberately puts the query at the end.
 
 Both new variants retain the corresponding legacy backbone widths, layers,
 learning rates, source streams, training duration, and batch-size settings by
-including `ad_dr.yaml` or `rad_dr.yaml`. Legacy dense SAR action losses and RAD
+including the corresponding `ad_dr.yaml` / `rad_dr.yaml` or
+`ad_dktd.yaml` / `rad_dktd.yaml`. Legacy dense SAR action losses and RAD
 compression buckets are untouched. New examples supervise one endpoint each;
 therefore equal batch sizes/updates do not imply equal numbers of action targets
 or equal training compute. Record that distinction when interpreting results.
@@ -41,14 +42,24 @@ vectors, and need not be divisible by three in the new model.
 | --- | ---: | ---: | ---: | ---: |
 | `ad_dpt_dr` | 80 | 0 | 79 (sliding window) | n/a |
 | `rad_dpt_dr` | 30 | 15 | up to 29 | 5 immediately after compression, up to 14 before the next |
+| `ad_dpt_dktd` | 100 | 0 | 99 (sliding window) | n/a |
+| `rad_dpt_dktd` | 72 | 60 | up to 71 | 10 immediately after compression, up to 11 before the next |
 
-The untouched SAR presets allocate 240 slots for AD and 90 for RAD. These new
+The untouched Darkroom SAR presets allocate 240 slots for AD and 90 for RAD;
+the DKTD SAR presets allocate 300 and 216 respectively. These new
 presets explicitly allocate one packed slot instead of three SAR slots for each
 nominal context step. RAD retains all 15 latent vectors and five recent
 transitions; its latent prefix consequently occupies a larger fraction of the
 packed window. **These are not equal-token-compute or exactly equal-compression-
 schedule runs.** To study a different resource constraint, create an additional
 ablation YAML overriding `policy_token_budget`; do not modify legacy presets.
+
+DKTD retains its baseline's 60 latent vectors and ten recent transitions. With
+the new 72-slot packed policy budget, only 11 recent-transition slots remain
+beside the latent prefix and query. Compression therefore recurs every **two**
+new transitions after the first compression at 72 transitions. This is an
+explicit resource choice consistent with the Darkroom preset convention, not a
+claim of matched compression frequency or runtime with SAR RAD.
 
 For budget `B`, latent count `M`, retained transitions `K`, and no initial null
 prefix, first compression happens after `B` completed transitions. Thereafter
@@ -98,7 +109,7 @@ state. Exact resume requires the same world size and precision.
 `TransitionDataset` reuses the legacy `ADDataset` reader's selected groups,
 streams, observations, actions, and rewards. It does not relabel actions or
 change which goals the baseline sees. Completed next states are recovered from
-Darkroom's deterministic transition function because the collector's terminal
+the environments' shared deterministic coordinate transition function because the collector's terminal
 `next_states` can contain reset observations. Online inference likewise stores
 the terminal next state and uses the reset observation as the next query. Memory
 persists across episodes on one task and resets for each evaluation run.
@@ -107,9 +118,18 @@ The legacy reader selects shuffled HDF5 group IDs directly. Those IDs need not
 equal canonical goal IDs, so its training goals may overlap the evaluation
 goals. This ablation preserves that selection for a like-for-like data comparison.
 The new evaluator records actual training/evaluation goal IDs and their overlap
-using the collection seed (Darkroom default 0). It prints any overlap instead of
+using the collection seed (Darkroom default 0; DKTD default 2). It prints any overlap instead of
 labeling those results strictly held out. A corrected-split experiment would
 require separately approved baseline data changes and retraining.
+
+DKTD has `grid_size ** 4` key/door tasks. The split audit uses these full task IDs
+(reported as `task_id_kind: key_door_pair`), not just door coordinates. For
+backward compatibility, the JSON ID lists retain their `*_goal_ids` field names.
+The observation remains just the agent's two coordinates: no privileged
+`have_key`, key position, or door position is added to the tokens. Recorded
+rewards distinguish key pickup and door arrival through trajectory history.
+Key possession resets each episode; recurrent task memory persists across
+episodes as in the Darkroom ablation.
 
 ## Commands
 
@@ -144,6 +164,28 @@ A fresh run rejects a nonempty destination. For a short smoke run, use a separat
 `--runs-root`, a small YAML with `torch_compile: false`, and `--updates 2`.
 CPU validation can use `--mixed-precision no` with `accelerate launch --cpu`.
 
+### Dark Key-to-Door
+
+The DKTD presets automatically select `config/env/dktd.yaml` and
+`config/algorithm/ppo_dktd.yaml`: a 9-by-9 grid, 50-step episodes, environment
+split seed 2, and the existing 0.995 training-task ratio. `--env dktd` can also
+select the environment explicitly; with no `--config`, it selects
+`rad_dpt_dktd`. Resume restores the checkpoint's environment and rejects a
+conflicting override.
+
+```powershell
+accelerate launch train_tokenization.py --config ad_dpt_dktd --seed 42
+accelerate launch train_tokenization.py --config rad_dpt_dktd --phase pretrain --seed 42
+accelerate launch train_tokenization.py --config rad_dpt_dktd --seed 42 --pretrain-ckpt runs/tokenization/RAD_DPT-pretrain-dktd-seed42/ckpt-50000.pt
+```
+
+DKTD pretraining inherits the baseline window of 72 transitions and 50,000
+updates. Existing DKTD PPO histories can be reused; no recollection or
+optimal-action labels are required. Its legacy AD/RAD training commands and
+configurations remain unchanged.
+
+### Four-way evaluation
+
 Supply checkpoints explicitly for the four-way comparison:
 
 ```powershell
@@ -155,6 +197,17 @@ select the largest **numeric** `ckpt-N.pt`; an explicitly supplied file is used
 as-is. Use a consistent checkpoint-selection rule across methods. The evaluator
 calls legacy AD/RAD inference unchanged, and loads new models only through their
 isolated registry. `--allow-partial` supports smoke tests with fewer methods.
+
+For DKTD, supply DKTD checkpoint paths and a separate output directory:
+
+```powershell
+python scripts/evaluate_tokenization.py --checkpoint AD=runs/AD-dktd-seed2 --checkpoint RAD=runs/RAD-dktd-seed2/best-model.pt --checkpoint AD_DPT=runs/tokenization/AD_DPT-dktd-seed42 --checkpoint RAD_DPT=runs/tokenization/RAD_DPT-dktd-seed42 --episodes 100 --output-dir runs/tokenization/comparison_dktd
+```
+
+The evaluator infers the environment from checkpoints. All checkpoints in one
+comparison must share an environment, task split, and horizon; Darkroom and
+DKTD cannot accidentally be averaged together. `--collection-env-split-seed`
+overrides checkpoint collection metadata and the environment-specific fallback.
 
 Outputs are `comparison.png`, per-checkpoint raw return arrays (`.npz`), and
 `metrics.json`, under `runs/tokenization/comparison`. Metrics include episode
@@ -174,6 +227,8 @@ python -m unittest discover -s ../tests -p test_gridworld_baselines.py -v
 Tests cover query placement, causal masks, source-action labels, replay/online
 memory parity, gradient-round truncation, unpadded microbatch weighting,
 variable-length/curriculum sampling, terminal/reset handling, pretraining,
-checkpoint compatibility, exact training resume, and evaluator artifacts.
+checkpoint compatibility, exact training resume, and four-way evaluator artifacts
+in both environments. DKTD checks include key/door reward order, key reset on
+episode boundaries, and unchanged two-coordinate queries.
 Legacy model/train/dataset/config sources remain unchanged. Full convergence and
 multi-GPU execution require experiment runs on the intended training hardware.
