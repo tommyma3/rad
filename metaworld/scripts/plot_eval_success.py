@@ -4,11 +4,13 @@ Plot AD and RAD Meta-world evaluation success rates for a selected task.
 Examples:
     uv run python plot_eval_success.py --task reach-v3
     uv run python plot_eval_success.py --task door-close-v3 --window 5
+    uv run python plot_eval_success.py --task reach-v3 --metric best-within-k
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import matplotlib
@@ -29,7 +31,14 @@ METHOD_COLORS = {
     "RAD": "#D55E00",
 }
 
+METRIC_LABELS = {
+    "per-episode": "Success rate",
+    "best-within-k": "Success rate (solved within k episodes)",
+}
+
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
+
+RUN_NAME_PATTERN = re.compile(r"^(?:AD|RAD)-ml1-(.+?)(?:-seed\d+)?$")
 
 
 def normalize_task(value: str) -> str:
@@ -48,6 +57,14 @@ def parse_args() -> argparse.Namespace:
         type=normalize_task,
         required=True,
         help="Meta-world task to plot, e.g. reach-v3, door-close-v3, window-open-v3.",
+    )
+    parser.add_argument(
+        "--metric",
+        choices=["per-episode", "best-within-k"],
+        default="per-episode",
+        help="per-episode: fraction of trials succeeding at episode k. "
+        "best-within-k: fraction of trials with at least one success in episodes 1..k, "
+        "matching the max-per-env number printed by evaluate.py at the final episode.",
     )
     parser.add_argument(
         "--runs-dir",
@@ -97,14 +114,12 @@ def moving_average(values: np.ndarray, window: int) -> np.ndarray:
 
 def available_tasks(runs_dir: Path) -> list[str]:
     tasks = set()
-    for run_dir in runs_dir.glob("*-ml1-*"):
-        name = run_dir.name
-        if name.startswith("RAD-pretrain-"):
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir():
             continue
-        for prefix in ("AD-ml1-", "RAD-ml1-"):
-            if name.startswith(prefix):
-                task = name[len(prefix) :].split("-var", 1)[0]
-                tasks.add(task)
+        match = RUN_NAME_PATTERN.match(run_dir.name)
+        if match:
+            tasks.add(match.group(1))
     return sorted(tasks)
 
 
@@ -150,9 +165,16 @@ def load_method_success(runs_dir: Path, method: str, task: str) -> tuple[np.ndar
     return np.concatenate(trials, axis=0), result_paths
 
 
-def summarize_success(success: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    mean = success.mean(axis=0)
-    std = success.std(axis=0)
+def summarize_success(
+    success: np.ndarray, window: int, metric: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if metric == "best-within-k":
+        solved = np.maximum.accumulate(success.astype(float), axis=1)
+    else:
+        solved = success.astype(float)
+
+    mean = solved.mean(axis=0)
+    std = solved.std(axis=0)
 
     smooth_mean = moving_average(mean, window)
     smooth_std = moving_average(std, window)
@@ -196,6 +218,7 @@ def plot_success(
     runs_dir: Path,
     output_dir: Path,
     window: int,
+    metric: str,
     formats: list[str],
     dpi: int,
 ) -> list[Path]:
@@ -208,7 +231,7 @@ def plot_success(
     for method in ("AD", "RAD"):
         success, paths = load_method_success(runs_dir, method, task)
         loaded_paths[method] = paths
-        episodes, mean, std = summarize_success(success, window)
+        episodes, mean, std = summarize_success(success, window, metric)
 
         color = METHOD_COLORS[method]
         label = f"{METHOD_LABELS[method]} (n={success.shape[0]})"
@@ -223,7 +246,7 @@ def plot_success(
 
     ax.set_title(f"{task_label(task)} Evaluation Success")
     ax.set_xlabel("Evaluation episode")
-    ax.set_ylabel("Success rate")
+    ax.set_ylabel(METRIC_LABELS[metric])
     ax.set_xlim(1, episodes[-1])
     ax.set_ylim(0.0, 1.02)
     ax.legend(frameon=False, loc="best")
@@ -233,7 +256,7 @@ def plot_success(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
-    stem = f"ad_rad_ml1_{task}_eval_success"
+    stem = f"ad_rad_ml1_{task}_eval_success" + ("_best_within_k" if metric == "best-within-k" else "")
     for fmt in formats:
         output_path = output_dir / f"{stem}.{fmt.lstrip('.')}"
         fig.savefig(output_path, bbox_inches="tight", dpi=dpi)
@@ -241,7 +264,7 @@ def plot_success(
 
     plt.close(fig)
 
-    print(f"Plotted {task_label(task)} evaluation success rates.")
+    print(f"Plotted {task_label(task)} evaluation success rates ({metric}).")
     for method, paths in loaded_paths.items():
         joined = ", ".join(str(p) for p in paths)
         print(f"  {method}: {joined}")
@@ -261,6 +284,7 @@ def main() -> None:
         runs_dir=args.runs_dir,
         output_dir=args.output_dir,
         window=args.window,
+        metric=args.metric,
         formats=args.formats,
         dpi=args.dpi,
     )
@@ -268,4 +292,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
