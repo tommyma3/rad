@@ -61,7 +61,7 @@ if __name__ == '__main__':
     
     model_name = config['model']
     model = MODEL[model_name](config).to(device)
-    load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
+    load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=bool(config.get('compressor_type')))
     if load_result.missing_keys:
         print(f'Missing model keys initialized from current config: {load_result.missing_keys}')
     if load_result.unexpected_keys:

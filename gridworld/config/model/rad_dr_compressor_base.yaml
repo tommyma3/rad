@@ -1,0 +1,17 @@
+include: config/model/rad_dr.yaml
+
+# Shared experimental contract. Keep legacy dataset behavior opt-in outside here.
+compressor_comparison: darkroom-compressor-v1
+dataset_task_mapping: collection_order
+collection_env_split_seed: 0
+env_split_seed: 0
+seed: 0
+vae_kl_weight: 0.001
+vae_kl_warmup_steps: 5000
+vae_eval_mode: mean
+vq_codebook_size: 256
+vq_commitment_weight: 0.25
+save_best_model: False
+# Independent latent generators and dynamic auxiliary losses run eagerly for
+# this first comparison. All three variants use the same execution mode.
+torch_compile: False

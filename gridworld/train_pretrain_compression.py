@@ -19,6 +19,8 @@ import argparse
 
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+from compressor_experiment import (add_experiment_arguments, apply_experiment_arguments,
+    make_data_generator, seed_data_worker, validate_checkpoint_config, audit_darkroom_dataset, model_config_path, write_run_metrics, comparison_optimizer_step)
 
 import yaml
 import torch
@@ -68,7 +70,9 @@ def get_pretrain_data_loader(dataset, batch_size, config, shuffle=True):
         shuffle=shuffle, 
         collate_fn=collate_fn, 
         num_workers=config['num_workers'], 
-        persistent_workers=True
+        generator=make_data_generator(config),
+        worker_init_fn=seed_data_worker,
+        persistent_workers=config['num_workers'] > 0
     )
 
 
@@ -82,6 +86,7 @@ if __name__ == '__main__':
                        help='Environment name: darkroom or dktd')
     parser.add_argument('--env_split_seed', type=int, default=None,
                        help='Override env_split_seed from the config')
+    add_experiment_arguments(parser)
     args = parser.parse_args()
     
     # Determine config files based on environment
@@ -97,10 +102,12 @@ if __name__ == '__main__':
     # Load configs
     config = get_config(f'./config/env/{env_cfg}.yaml')
     config.update(get_config(f'./config/algorithm/{alg_cfg}.yaml'))
-    config.update(get_config(f'./config/model/{model_cfg}.yaml'))
+    config.update(get_config(model_config_path(model_cfg)))
     config.update(config.pop('pretrain'))
     if args.env_split_seed is not None:
         config['env_split_seed'] = args.env_split_seed
+
+    apply_experiment_arguments(config, args, pretrain=True)
 
     # Set seed for reproducibility
     set_seed(config.get('seed', 42))
@@ -119,23 +126,31 @@ if __name__ == '__main__':
     except FileNotFoundError:
         config_exists = False
 
+    if config_exists and config.get('compressor_comparison'):
+        raise ValueError(f'Comparison run already exists: {log_dir}; use a fresh run directory')
     if config_exists:
         print(f'WARNING: {log_dir} already exists. Skipping...')
         exit(0)
     
     config['log_dir'] = log_dir
-    config['traj_dir'] = './datasets'
-    config['mixed_precision'] = 'fp16'
+    config.setdefault('traj_dir', './datasets')
+    config.setdefault('mixed_precision', 'fp16')
     configure_torch_runtime(config)
 
     # Initialize accelerator for multi-GPU support
     accelerator = Accelerator(
+        cpu=args.cpu,
         mixed_precision=config['mixed_precision'],
         gradient_accumulation_steps=config.get('gradient_accumulation_steps', 1),
     )
     
+    if config.get('compressor_comparison') and accelerator.num_processes != 1:
+        raise ValueError('This comparison protocol requires one process/GPU per run')
     config['device'] = accelerator.device
     
+    if config.get('compressor_comparison'):
+        config['dataset_audit'] = audit_darkroom_dataset(config, config['traj_dir'])
+
     # Only main process prints and logs
     is_main = accelerator.is_main_process
     
@@ -144,6 +159,8 @@ if __name__ == '__main__':
         writer = SummaryWriter(log_dir, flush_secs=15)
         print(f'Using Device: {config["device"]}')
         print(f'Number of processes: {accelerator.num_processes}')
+        with open(config_save_path, 'w') as stream:
+            yaml.dump(config, stream)
 
     # Create model
     model = MODEL[config['model']](config)
@@ -167,7 +184,6 @@ if __name__ == '__main__':
         config=config, 
         shuffle=True
     )
-    train_dataloader = next_dataloader(train_dataloader)
 
     if is_main:
         load_end_time = datetime.now()
@@ -201,8 +217,9 @@ if __name__ == '__main__':
     ckpt_paths = sorted(glob(path.join(config['log_dir'], 'pretrain-ckpt-*.pt')))
     if len(ckpt_paths) > 0:
         ckpt_path = ckpt_paths[-1]
-        ckpt = torch.load(ckpt_path, map_location=config['device'])
-        load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=False)
+        ckpt = torch.load(ckpt_path, map_location=config['device'], weights_only=False)
+        validate_checkpoint_config(config, ckpt['config'], same_stage=True)
+        load_result = model.load_state_dict(normalize_compiled_state_dict(ckpt['model']), strict=bool(config.get('compressor_type')))
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_sched.load_state_dict(ckpt['lr_sched'])
         step = ckpt['step']
@@ -225,6 +242,8 @@ if __name__ == '__main__':
         model, optimizer, train_dataloader, lr_sched
     )
 
+    train_dataloader = next_dataloader(train_dataloader)
+
     if is_main:
         start_time = datetime.now()
         print(f'Pre-training started at {start_time}')
@@ -241,24 +260,27 @@ if __name__ == '__main__':
             
             step += 1
             
-            with accelerator.autocast():
-                output = unwrapped_model.forward_pretrain_compression(batch)
-            
-            loss = output['loss_recon']
-
-            optimizer.zero_grad()
-            accelerator.backward(loss)
-            accelerator.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            if config.get('compressor_comparison'):
+                output = comparison_optimizer_step(model, batch, optimizer, accelerator, config,
+                                                   pretrain=True, pretrain_step=step)
+            else:
+                with accelerator.autocast():
+                    output = model(batch, pretrain=True, pretrain_step=step)
+                optimizer.zero_grad()
+                accelerator.backward(output['loss_total'])
+                accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+            loss = output['loss_total']
 
             if not accelerator.optimizer_step_was_skipped:
                 lr_sched.step()
 
-            pbar.set_postfix(loss_recon=loss.item())
+            pbar.set_postfix(loss_total=loss.item(), loss_recon=output['loss_recon'].item())
 
             # Logging
-            if is_main and step % config['summary_interval'] == 0:
-                writer.add_scalar('pretrain/loss_recon', loss.item(), step)
+            if is_main and (step % config['summary_interval'] == 0 or step == config['pretrain_timesteps']):
+                for key, value in output.items():
+                    writer.add_scalar(f'pretrain/{key}', value.detach().float().item(), step)
                 writer.add_scalar('pretrain/lr', lr_sched.get_last_lr()[0], step)
 
             # Save checkpoint
@@ -295,6 +317,8 @@ if __name__ == '__main__':
         }, final_path)
         print(f'\nFinal model saved to {final_path}')
 
+        if 'output' in locals():
+            write_run_metrics(unwrapped_model, config, output, (datetime.now() - start_time).total_seconds(), pretrain=True)
         writer.flush()
         
         end_time = datetime.now()

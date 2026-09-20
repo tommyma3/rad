@@ -128,7 +128,8 @@ class CompressionTransformer(nn.Module):
     - Multiple layers of [Self-Attention -> Cross-Attention -> FFN]
     - Output: latent tokens that represent compressed information
     """
-    def __init__(self, d_model, n_heads, n_layers, n_compress_tokens, dim_feedforward=None, dropout=0.1, max_context_length=2048):
+    def __init__(self, d_model, n_heads, n_layers, n_compress_tokens, dim_feedforward=None, dropout=0.1, max_context_length=2048,
+                 compressor_type='ae', vq_codebook_size=256):
         super().__init__()
         
         self.d_model = d_model
@@ -152,8 +153,26 @@ class CompressionTransformer(nn.Module):
         
         # Final layer norm
         self.final_norm = nn.LayerNorm(d_model)
-        
-    def forward(self, context):
+
+        if compressor_type not in ('ae', 'vae', 'vq_vae'):
+            raise ValueError(f'Unknown compressor_type: {compressor_type}')
+        self.compressor_type = compressor_type
+        # Extra heads must not change initialization of the shared decoder/policy.
+        with torch.random.fork_rng(devices=[]):
+            if compressor_type == 'vae':
+                self.posterior_mean = nn.Linear(d_model, d_model)
+                self.posterior_logvar = nn.Linear(d_model, d_model)
+                nn.init.eye_(self.posterior_mean.weight)
+                nn.init.zeros_(self.posterior_mean.bias)
+                nn.init.zeros_(self.posterior_logvar.weight)
+                nn.init.zeros_(self.posterior_logvar.bias)
+            elif compressor_type == 'vq_vae':
+                if vq_codebook_size < 2:
+                    raise ValueError('vq_codebook_size must be at least 2')
+                self.codebook = nn.Embedding(vq_codebook_size, d_model)
+                nn.init.normal_(self.codebook.weight)
+
+    def forward(self, context, noise=None, return_aux=False):
         """
         Compress a sequence into latent tokens.
         
@@ -178,8 +197,41 @@ class CompressionTransformer(nn.Module):
             
         # Final normalization
         latent_tokens = self.final_norm(queries)
-        
-        return latent_tokens
+        aux = {}
+        if self.compressor_type == 'vae':
+            mean = self.posterior_mean(latent_tokens).float()
+            logvar = self.posterior_logvar(latent_tokens).float().clamp(-12.0, 8.0)
+            variance = logvar.exp()
+            aux = {
+                'loss_kl': 0.5 * (mean.square() + variance - 1.0 - logvar).mean(),
+                'posterior_variance': variance.detach().mean(),
+                'posterior_mean_square': mean.detach().square().mean(),
+            }
+            latent_tokens = mean if noise is None else mean + variance.sqrt() * noise
+            latent_tokens = latent_tokens.to(queries.dtype)
+        elif self.compressor_type == 'vq_vae':
+            # Distances and bottleneck losses stay in fp32 under mixed precision.
+            with torch.autocast(device_type=context.device.type, enabled=False):
+                encoded = latent_tokens.float()
+                codes = self.codebook.weight.float()
+                distances = (encoded.square().sum(-1, keepdim=True)
+                             + codes.square().sum(-1)
+                             - 2.0 * encoded @ codes.t())
+                indices = distances.argmin(-1)
+                quantized = F.embedding(indices, codes)
+                counts = F.one_hot(indices, codes.shape[0]).float().sum(dim=(0, 1))
+                probabilities = counts / counts.sum().clamp_min(1)
+                aux = {
+                    'loss_codebook': F.mse_loss(quantized, encoded.detach()),
+                    'loss_commitment': F.mse_loss(encoded, quantized.detach()),
+                    'codebook_usage': (counts > 0).float().mean(),
+                    'codebook_perplexity': (-(probabilities * probabilities.clamp_min(1e-10).log()).sum()).exp(),
+                }
+                # Reconstruction/action gradients train the encoder; the explicit
+                # codebook loss trains the selected dictionary entries.
+                latent_tokens = (encoded + (quantized - encoded).detach()).to(queries.dtype)
+
+        return (latent_tokens, aux) if return_aux else latent_tokens
 
 
 class ReconstructionDecoder(nn.Module):

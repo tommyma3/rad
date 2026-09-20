@@ -1,0 +1,2 @@
+include: config/model/rad_dr_compressor_base.yaml
+compressor_type: vae

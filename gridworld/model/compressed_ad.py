@@ -27,6 +27,15 @@ class RAD(nn.Module):
         super(RAD, self).__init__()
 
         self.config = config
+        self.compressor_type = config.get('compressor_type', 'ae')
+        self.vae_kl_weight = float(config.get('vae_kl_weight', 1e-3))
+        self.vq_commitment_weight = float(config.get('vq_commitment_weight', 0.25))
+        self.vae_eval_mode = config.get('vae_eval_mode', 'mean')
+        if self.vae_eval_mode not in ('mean', 'sample'):
+            raise ValueError('vae_eval_mode must be mean or sample')
+        self._latent_generators = {}
+        self._latent_seed = int(config.get('seed', 42)) + 100003
+        self._pretrain_step = None
         self.device = config['device']
         self.n_transit = config['n_transit']
         self.max_seq_length = 3 * self.n_transit
@@ -91,6 +100,8 @@ class RAD(nn.Module):
             n_compress_tokens=self.n_compress_tokens,
             dim_feedforward=tf_dim_feedforward,
             max_context_length=max(self.max_context_tokens + self.n_compress_tokens, self.max_seq_length),
+            compressor_type=self.compressor_type,
+            vq_codebook_size=config.get('vq_codebook_size', 256),
         )
         self.reconstruction_decoder = ReconstructionDecoder(
             d_model=tf_n_embd,
@@ -224,11 +235,49 @@ class RAD(nn.Module):
 
         raise RuntimeError(f'Unhandled latent_update_mode: {self.latent_update_mode}')
 
+    def reset_latent_rng(self, seed):
+        """Independent stream: latent sampling never consumes policy/data RNG."""
+        self._latent_seed = int(seed) + 100003
+        self._latent_generators.clear()
+
+    def _compression_candidate(self, context_embed):
+        compressor = self._module_for_current_grad_mode(self.compression_transformer)
+        if self.compressor_type == 'ae':
+            return compressor(context_embed), {}
+        noise = None
+        if self.compressor_type == 'vae' and (self.training or self.vae_eval_mode == 'sample'):
+            key = str(context_embed.device)
+            if key not in self._latent_generators:
+                self._latent_generators[key] = torch.Generator(device=context_embed.device).manual_seed(self._latent_seed)
+            noise = torch.randn(
+                context_embed.shape[0], self.n_compress_tokens, context_embed.shape[-1],
+                device=context_embed.device, generator=self._latent_generators[key],
+            )
+        candidate, aux = compressor(context_embed, noise=noise, return_aux=True)
+        # Own the outputs across repeated compiled compressor invocations.
+        return candidate.clone(), {key: value.clone() for key, value in aux.items()}
+
+    def _bottleneck_loss(self, aux, pretrain=False):
+        zero = torch.zeros((), device=self.device)
+        kl_weight = self.vae_kl_weight
+        if pretrain and self._pretrain_step is not None:
+            warmup = int(self.config.get('vae_kl_warmup_steps', 5000))
+            kl_weight *= min(1.0, self._pretrain_step / max(1, warmup))
+        return (kl_weight * aux.get('loss_kl', zero)
+                + aux.get('loss_codebook', zero)
+                + self.vq_commitment_weight * aux.get('loss_commitment', zero))
+
     def _compress_sequence(self, context_embed, allow_gradient, old_latent_tokens=None):
         grad_enabled = torch.is_grad_enabled() and allow_gradient
         with torch.set_grad_enabled(grad_enabled):
-            compression_transformer = self._module_for_current_grad_mode(self.compression_transformer)
-            latent_tokens = compression_transformer(context_embed)
+            # RADTransition also reuses this method without RAD's constructor.
+            if getattr(self, 'compressor_type', 'ae') == 'ae':
+                compressor = self._module_for_current_grad_mode(self.compression_transformer)
+                latent_tokens, aux = compressor(context_embed), {}
+            else:
+                latent_tokens, aux = self._compression_candidate(context_embed)
+            if grad_enabled and getattr(self, '_compression_aux', None) is not None:
+                self._compression_aux.append(aux)
             latent_tokens = self._update_latent_tokens(old_latent_tokens, latent_tokens)
         # Compiled CUDAGraph outputs can be overwritten by later compiled
         # invocations; latent memory is kept across compression rounds.
@@ -449,7 +498,11 @@ class RAD(nn.Module):
             'num_compressions': total_compressions,
         }
 
-    def forward(self, x):
+    def forward(self, x, pretrain=False, pretrain_step=None):
+        # Route pretraining through forward so DDP sees the actual computation.
+        if pretrain:
+            self._pretrain_step = pretrain_step
+            return self.forward_pretrain_compression(x)
         states = x['states'].to(self.device)
         actions = x['actions'].to(self.device)
         rewards = x['rewards'].to(self.device)
@@ -460,9 +513,18 @@ class RAD(nn.Module):
         tokens, state_mask, token_targets = self._build_token_sequence(
             states, actions, rewards, context_lengths=context_lengths
         )
-        latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info = self._roll_context_into_memory(
-            tokens, state_mask=state_mask, token_targets=token_targets
-        )
+        self._compression_aux = []
+        try:
+            latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info = self._roll_context_into_memory(
+                tokens, state_mask=state_mask, token_targets=token_targets
+            )
+            auxiliary = {
+                key: torch.stack([entry[key] for entry in self._compression_aux]).mean()
+                for key in (self._compression_aux[0] if self._compression_aux else {})
+            }
+            auxiliary_rounds = len(self._compression_aux) if auxiliary else 0
+        finally:
+            self._compression_aux = None
 
         transformer_input, has_latent = self._pack_memory_input(latent_tokens, recent_context)
         transformer_output = self._forward_ad_transformer(transformer_input, has_latent_prefix=has_latent)
@@ -478,10 +540,12 @@ class RAD(nn.Module):
 
         return {
             'loss_action': loss_action,
-            'loss_total': loss_action,
+            'loss_total': loss_action + self._bottleneck_loss(auxiliary),
             'loss_recon': torch.tensor(0.0, device=self.device),
             'acc_action': acc_action,
             'num_compressions': compression_info['num_compressions'],
+            'auxiliary_rounds': auxiliary_rounds,
+            **auxiliary,
         }
 
     def forward_pretrain_compression(self, x):
@@ -490,19 +554,21 @@ class RAD(nn.Module):
         rewards = x['rewards'].to(self.device)
 
         tokens, _, _ = self._build_token_sequence(states, actions, rewards)
-        latent_tokens = self.compression_transformer(tokens)
+        latent_tokens, auxiliary = self._compression_candidate(tokens)
         reconstructed = self.reconstruction_decoder(latent_tokens, tokens.shape[1])
         recon_loss = F.mse_loss(reconstructed, tokens.detach())
 
         return {
             'loss_recon': recon_loss,
-            'loss_total': recon_loss,
+            'loss_total': recon_loss + self._bottleneck_loss(auxiliary, pretrain=True),
+            **auxiliary,
         }
 
     @torch.inference_mode()
-    def evaluate_in_context(self, vec_env, eval_timesteps, beam_k=0, sample=True):
+    def evaluate_in_context(self, vec_env, eval_timesteps, beam_k=0, sample=True, action_seed=None):
         outputs = {'reward_episode': [], 'compression_events': []}
         reward_episode = np.zeros(vec_env.num_envs)
+        action_generator = None if action_seed is None else torch.Generator(device=self.device).manual_seed(action_seed)
 
         query_states = vec_env.reset()
         query_states = torch.as_tensor(query_states, device=self.device, dtype=torch.long)
@@ -519,7 +585,7 @@ class RAD(nn.Module):
 
             if sample:
                 log_probs = F.log_softmax(logits, dim=-1)
-                actions = torch.multinomial(log_probs.exp(), num_samples=1)
+                actions = torch.multinomial(log_probs.exp(), num_samples=1, generator=action_generator)
                 actions = rearrange(actions, 'e 1 -> e')
             else:
                 actions = logits.argmax(dim=-1)
@@ -573,7 +639,26 @@ class RAD(nn.Module):
         self.max_compressions = max_compressions
 
     def load_pretrained_compression(self, pretrain_checkpoint_path):
-        checkpoint = torch.load(pretrain_checkpoint_path, map_location=self.device)
+        from compressor_experiment import validate_checkpoint_config
+        from utils import normalize_compiled_state_dict
+        checkpoint = torch.load(pretrain_checkpoint_path, map_location=self.device, weights_only=False)
+        validate_checkpoint_config(self.config, checkpoint['config'])
+        if self.config.get('compressor_comparison'):
+            from pathlib import Path
+            import hashlib
+            source_config = checkpoint['config']
+            if checkpoint.get('step') != source_config.get('pretrain_timesteps'):
+                raise ValueError('Comparison requires a completed pretraining checkpoint')
+            with open(pretrain_checkpoint_path, 'rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            settings = ('pretrain_timesteps', 'pretrain_batch_size', 'pretrain_lr',
+                        'pretrain_warmup_steps', 'n_transit', 'always_use_latent_prefix',
+                        'num_workers', 'mixed_precision', 'torch_compile')
+            self.config['pretrain_provenance'] = dict(
+                checkpoint=str(Path(pretrain_checkpoint_path).resolve()), sha256=digest,
+                step=checkpoint['step'], settings={key: source_config.get(key) for key in settings},
+            )
+        checkpoint['model'] = normalize_compiled_state_dict(checkpoint['model'])
 
         compression_state = {
             k.replace('compression_transformer.', ''): v

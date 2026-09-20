@@ -15,6 +15,7 @@ import random
 from einops import rearrange, repeat
 from typing import Iterator, List
 import math
+from compressor_experiment import select_dataset_groups
 
 
 class ADDataset(Dataset):
@@ -26,27 +27,8 @@ class ADDataset(Dataset):
         self.n_transit = config['n_transit']
         self.dynamics = config['dynamics']
         
-        if self.env == 'darkroom':
-            n_total_envs = config['grid_size'] ** 2
-        elif self.env == 'dktd':
-            n_total_envs = config['grid_size'] ** 4
-        else:
-            raise ValueError(f'Invalid env: {self.env}')
-
-        total_env_idx = list(range(n_total_envs))
-        random.seed(config['env_split_seed'])
-        random.shuffle(total_env_idx)
-        
-        n_train_envs = round(n_total_envs * config['train_env_ratio'])
-        
-        if mode == 'train':
-            env_idx = total_env_idx[:n_train_envs]
-        elif mode == 'test':
-            env_idx = total_env_idx[n_train_envs:]
-        elif mode == 'all':
-            env_idx = total_env_idx
-        else:
-            raise ValueError('Invalid mode')
+        env_idx = select_dataset_groups(config, mode)
+        self.group_ids = env_idx
 
         states = []
         actions = []
@@ -56,6 +38,8 @@ class ADDataset(Dataset):
         with h5py.File(f'{traj_dir}/{get_traj_file_name(config)}.hdf5', 'r') as f:
             for i in env_idx:
                 grp = f.get(f'{i}')
+                if grp is None and config.get('dataset_task_mapping') == 'collection_order':
+                    raise ValueError(f'Missing source history group {i}')
                 if grp is None:
                     continue  # Skip missing trajectory groups
                 states.append(grp['states'][()].transpose(1, 0, 2)[:n_stream, :source_timesteps])
@@ -174,6 +158,7 @@ class CompressionBucketBatchSampler(Sampler[List[tuple]]):
 
     def __init__(self, dataset: 'RADDataset', batch_size: int, shuffle: bool = True, drop_last: bool = False):
         self.dataset = dataset
+        self.rng = random.Random(dataset.config.get('data_seed', dataset.config.get('seed', 42)) + 1) if dataset.config.get('compressor_comparison') else None
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_last = drop_last
@@ -191,7 +176,7 @@ class CompressionBucketBatchSampler(Sampler[List[tuple]]):
 
             bucket = self.dataset.sample_compression_bucket()
             if self.shuffle:
-                batch = [random.randrange(n_samples) for _ in range(curr_batch_size)]
+                batch = [(self.rng or random).randrange(n_samples) for _ in range(curr_batch_size)]
             else:
                 start = batch_idx * self.batch_size
                 batch = [idx % n_samples for idx in range(start, start + curr_batch_size)]
@@ -220,6 +205,7 @@ class RADDataset(Dataset):
 
     def __init__(self, config, traj_dir, mode='train', n_stream=None, source_timesteps=None):
         self.config = config
+        self.rng = random.Random(config.get('data_seed', config.get('seed', 42))) if config.get('compressor_comparison') else None
         self.env = config['env']
         self.n_transit = config['n_transit']  # Environment timesteps, represented by 3 tokens each
         self.n_compress_tokens = config.get('n_compress_tokens', 40)
@@ -247,27 +233,8 @@ class RADDataset(Dataset):
         # Validate distribution sums to 1.0
         self._validate_distribution(self.length_distribution)
         
-        if self.env == 'darkroom':
-            n_total_envs = config['grid_size'] ** 2
-        elif self.env == 'dktd':
-            n_total_envs = config['grid_size'] ** 4
-        else:
-            raise ValueError(f'Invalid environment: {self.env}')
-
-        total_env_idx = list(range(n_total_envs))
-        random.seed(config['env_split_seed'])
-        random.shuffle(total_env_idx)
-        
-        n_train_envs = round(n_total_envs * config['train_env_ratio'])
-        
-        if mode == 'train':
-            env_idx = total_env_idx[:n_train_envs]
-        elif mode == 'test':
-            env_idx = total_env_idx[n_train_envs:]
-        elif mode == 'all':
-            env_idx = total_env_idx
-        else:
-            raise ValueError('Invalid mode')
+        env_idx = select_dataset_groups(config, mode)
+        self.group_ids = env_idx
 
         states = []
         actions = []
@@ -277,6 +244,8 @@ class RADDataset(Dataset):
         with h5py.File(f'{traj_dir}/{get_traj_file_name(config)}.hdf5', 'r') as f:
             for i in env_idx:
                 grp = f.get(f'{i}')
+                if grp is None and config.get('dataset_task_mapping') == 'collection_order':
+                    raise ValueError(f'Missing source history group {i}')
                 if grp is None:
                     continue  # Skip missing trajectory groups
                 states.append(grp['states'][()].transpose(1, 0, 2)[:n_stream, :source_timesteps])
@@ -407,7 +376,7 @@ class RADDataset(Dataset):
     def sample_compression_bucket(self):
         """Sample a compression-count bucket from the current curriculum state."""
         dist = self._compression_bucket_distribution()
-        r = random.random()
+        r = (self.rng or random).random()
         cumulative = 0.0
 
         for bucket, prob in sorted(dist.items()):
@@ -423,7 +392,7 @@ class RADDataset(Dataset):
     
     def _sample_context_length(self):
         """Sample context length from distribution supporting multi-compression training."""
-        r = random.random()
+        r = (self.rng or random).random()
         cumulative = 0
         
         max_available = self.seq_length
@@ -454,10 +423,10 @@ class RADDataset(Dataset):
                 high = min(high, max_available)
                 low = min(low, high)  # Ensure low <= high
                 
-                return random.randint(low, high)
+                return (self.rng or random).randint(low, high)
         
         # Fallback
-        return random.randint(self.min_context, min(self.max_context, max_available))
+        return (self.rng or random).randint(self.min_context, min(self.max_context, max_available))
 
     def _sample_context_length_for_category(self, category):
         """Sample context length for a specific length category."""
@@ -479,7 +448,7 @@ class RADDataset(Dataset):
         high = min(high, max_available)
         low = min(low, high)
 
-        return random.randint(low, high)
+        return (self.rng or random).randint(low, high)
 
     def _sample_context_length_for_compressions(self, n_compressions):
         """Return the fixed context length for a compression-count bucket."""
@@ -510,7 +479,7 @@ class RADDataset(Dataset):
         if min_end >= max_end:
             end_idx = max_end
         else:
-            end_idx = random.randint(min_end, max_end)
+            end_idx = (self.rng or random).randint(min_end, max_end)
         
         start_idx = end_idx - context_length
         
@@ -540,31 +509,13 @@ class CompressionPretrainDataset(Dataset):
     
     def __init__(self, config, traj_dir, mode='train', n_stream=None, source_timesteps=None):
         self.config = config
+        self.rng = random.Random(config.get('data_seed', config.get('seed', 42))) if config.get('compressor_comparison') else None
         self.env = config['env']
         self.window_size = config['n_transit']  # Environment timesteps to compress
         self.dynamics = config['dynamics']
         
-        if self.env == 'darkroom':
-            n_total_envs = config['grid_size'] ** 2
-        elif self.env == 'dktd':
-            n_total_envs = config['grid_size'] ** 4
-        else:
-            raise ValueError(f'Invalid env: {self.env}')
-
-        total_env_idx = list(range(n_total_envs))
-        random.seed(config['env_split_seed'])
-        random.shuffle(total_env_idx)
-        
-        n_train_envs = round(n_total_envs * config['train_env_ratio'])
-        
-        if mode == 'train':
-            env_idx = total_env_idx[:n_train_envs]
-        elif mode == 'test':
-            env_idx = total_env_idx[n_train_envs:]
-        elif mode == 'all':
-            env_idx = total_env_idx
-        else:
-            raise ValueError('Invalid mode')
+        env_idx = select_dataset_groups(config, mode)
+        self.group_ids = env_idx
 
         states = []
         actions = []
@@ -574,6 +525,8 @@ class CompressionPretrainDataset(Dataset):
         with h5py.File(f'{traj_dir}/{get_traj_file_name(config)}.hdf5', 'r') as f:
             for i in env_idx:
                 grp = f.get(f'{i}')
+                if grp is None and config.get('dataset_task_mapping') == 'collection_order':
+                    raise ValueError(f'Missing source history group {i}')
                 if grp is None:
                     continue  # Skip missing trajectory groups
                 states.append(grp['states'][()].transpose(1, 0, 2)[:n_stream, :source_timesteps])
@@ -597,7 +550,7 @@ class CompressionPretrainDataset(Dataset):
         
         # Random window start
         max_start = self.seq_length - self.window_size
-        start_idx = random.randint(0, max_start)
+        start_idx = (self.rng or random).randint(0, max_start)
         end_idx = start_idx + self.window_size
         
         traj = {

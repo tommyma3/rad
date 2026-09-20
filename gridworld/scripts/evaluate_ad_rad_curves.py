@@ -205,7 +205,7 @@ def load_model(ckpt_path: Path, device: torch.device):
     config = dict(checkpoint["config"])
     config["device"] = device
     model = MODEL[config["model"]](config).to(device)
-    strict = config["model"] != "RAD"
+    strict = config["model"] != "RAD" or bool(config.get('compressor_type'))
     load_result = model.load_state_dict(
         normalize_compiled_state_dict(checkpoint["model"]),
         strict=strict,
