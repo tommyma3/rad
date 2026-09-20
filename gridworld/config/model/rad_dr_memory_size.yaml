@@ -1,0 +1,33 @@
+include: config/model/rad_dr.yaml
+
+memory_size_comparison: darkroom-memory-size-v1
+compressor_type: ae
+dataset_task_mapping: collection_order
+collection_env_split_seed: 0
+env_split_seed: 0
+seed: 0
+
+# n_latents in the paper/launcher is n_compress_tokens in model checkpoints.
+n_compress_tokens: 15
+always_use_latent_prefix: False
+# Raw S/A/R history capacities, independent of latent count (timesteps).
+first_recent_capacity: 30
+recurrent_recent_capacity: 25
+short_memory_keep: 5
+latent_update_mode: gru_gate
+save_best_model: False
+torch_compile: False
+
+pretrain:
+  # Pretraining directly reconstructs a fixed 40-timestep window; it does not
+  # invoke the recurrent policy. Keep this dataset window equal across sizes.
+  n_transit: 40
+  always_use_latent_prefix: False
+  first_recent_capacity: 35
+  recurrent_recent_capacity: 35
+  pretrain_timesteps: 40000
+  pretrain_batch_size: 512
+  pretrain_lr: 0.0003
+  pretrain_warmup_steps: 3000
+  train_n_stream: 100
+  num_workers: 16

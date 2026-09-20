@@ -19,7 +19,7 @@ import argparse
 
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from compressor_experiment import (add_experiment_arguments, apply_experiment_arguments,
+from compressor_experiment import (is_comparison, add_experiment_arguments, apply_experiment_arguments,
     make_data_generator, seed_data_worker, validate_checkpoint_config, audit_darkroom_dataset, model_config_path, write_run_metrics, comparison_optimizer_step)
 
 import yaml
@@ -126,7 +126,7 @@ if __name__ == '__main__':
     except FileNotFoundError:
         config_exists = False
 
-    if config_exists and config.get('compressor_comparison'):
+    if config_exists and is_comparison(config):
         raise ValueError(f'Comparison run already exists: {log_dir}; use a fresh run directory')
     if config_exists:
         print(f'WARNING: {log_dir} already exists. Skipping...')
@@ -144,11 +144,11 @@ if __name__ == '__main__':
         gradient_accumulation_steps=config.get('gradient_accumulation_steps', 1),
     )
     
-    if config.get('compressor_comparison') and accelerator.num_processes != 1:
+    if is_comparison(config) and accelerator.num_processes != 1:
         raise ValueError('This comparison protocol requires one process/GPU per run')
     config['device'] = accelerator.device
     
-    if config.get('compressor_comparison'):
+    if is_comparison(config):
         config['dataset_audit'] = audit_darkroom_dataset(config, config['traj_dir'])
 
     # Only main process prints and logs
@@ -260,7 +260,7 @@ if __name__ == '__main__':
             
             step += 1
             
-            if config.get('compressor_comparison'):
+            if is_comparison(config):
                 output = comparison_optimizer_step(model, batch, optimizer, accelerator, config,
                                                    pretrain=True, pretrain_step=step)
             else:

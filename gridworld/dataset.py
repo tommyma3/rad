@@ -15,7 +15,8 @@ import random
 from einops import rearrange, repeat
 from typing import Iterator, List
 import math
-from compressor_experiment import select_dataset_groups
+from compressor_experiment import select_dataset_groups, is_comparison
+from memory_capacity import recent_capacities
 
 
 class ADDataset(Dataset):
@@ -158,7 +159,7 @@ class CompressionBucketBatchSampler(Sampler[List[tuple]]):
 
     def __init__(self, dataset: 'RADDataset', batch_size: int, shuffle: bool = True, drop_last: bool = False):
         self.dataset = dataset
-        self.rng = random.Random(dataset.config.get('data_seed', dataset.config.get('seed', 42)) + 1) if dataset.config.get('compressor_comparison') else None
+        self.rng = random.Random(dataset.config.get('data_seed', dataset.config.get('seed', 42)) + 1) if is_comparison(dataset.config) else None
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_last = drop_last
@@ -205,7 +206,7 @@ class RADDataset(Dataset):
 
     def __init__(self, config, traj_dir, mode='train', n_stream=None, source_timesteps=None):
         self.config = config
-        self.rng = random.Random(config.get('data_seed', config.get('seed', 42))) if config.get('compressor_comparison') else None
+        self.rng = random.Random(config.get('data_seed', config.get('seed', 42))) if is_comparison(config) else None
         self.env = config['env']
         self.n_transit = config['n_transit']  # Environment timesteps, represented by 3 tokens each
         self.n_compress_tokens = config.get('n_compress_tokens', 40)
@@ -290,11 +291,15 @@ class RADDataset(Dataset):
 
     def _first_memory_capacity(self):
         """Environment timesteps available before the first compression."""
+        if self.config.get('first_recent_capacity') is not None:
+            return recent_capacities(self.config)[0] // 3
         reserved = self.compress_timesteps if self.always_use_latent_prefix else 0
         return max(1, self.n_transit - reserved)
 
     def _compressed_memory_capacity(self):
         """Environment timesteps available next to a real latent prefix."""
+        if self.config.get('recurrent_recent_capacity') is not None:
+            return recent_capacities(self.config)[1] // 3
         return max(1, self.n_transit - self.compress_timesteps)
 
     def _raw_bucket_length_for_compressions(self, n_compressions):
@@ -509,7 +514,7 @@ class CompressionPretrainDataset(Dataset):
     
     def __init__(self, config, traj_dir, mode='train', n_stream=None, source_timesteps=None):
         self.config = config
-        self.rng = random.Random(config.get('data_seed', config.get('seed', 42))) if config.get('compressor_comparison') else None
+        self.rng = random.Random(config.get('data_seed', config.get('seed', 42))) if is_comparison(config) else None
         self.env = config['env']
         self.window_size = config['n_transit']  # Environment timesteps to compress
         self.dynamics = config['dynamics']

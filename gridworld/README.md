@@ -1,5 +1,17 @@
 # gridworld_test
 
+## Darkroom memory-size ablation
+
+See [MEMORY_SIZE_ABLATION.md](MEMORY_SIZE_ABLATION.md) for the 3/6/15/30/60-latent
+sweep with fixed recent-history capacities, a disabled initial null prefix in both
+phases, independent pretraining per size/seed, and paired held-out evaluation.
+
+```bash
+python scripts/run_memory_size_comparison.py --stage all --dry-run
+python scripts/run_memory_size_comparison.py --stage pilot --gpu 0
+python scripts/run_memory_size_comparison.py --stage all --gpu 0
+```
+
 ## RAD Latent-Update Comparison
 
 This experiment compares RAD-only latent update variants on dark key-to-door:

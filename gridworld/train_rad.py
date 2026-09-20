@@ -25,7 +25,7 @@ import gc
 import yaml
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from compressor_experiment import (add_experiment_arguments, apply_experiment_arguments,
+from compressor_experiment import (is_comparison, add_experiment_arguments, apply_experiment_arguments,
     make_data_generator, seed_data_worker, validate_checkpoint_config, audit_darkroom_dataset, model_config_path, write_run_metrics, comparison_optimizer_step)
 
 import yaml
@@ -338,7 +338,7 @@ if __name__ == '__main__':
     except FileNotFoundError:
         config_exists = False
 
-    if config_exists and config.get('compressor_comparison'):
+    if config_exists and is_comparison(config):
         raise ValueError(f'Comparison run already exists: {log_dir}; use a fresh run directory')
     if config_exists:
         print(f'WARNING: {log_dir} already exists. Will resume if checkpoint exists.')
@@ -361,11 +361,11 @@ if __name__ == '__main__':
         gradient_accumulation_steps=config.get('gradient_accumulation_steps', 1),
     )
     
-    if config.get('compressor_comparison') and accelerator.num_processes != 1:
+    if is_comparison(config) and accelerator.num_processes != 1:
         raise ValueError('This comparison protocol requires one process/GPU per run')
     config['device'] = accelerator.device
     
-    if config.get('compressor_comparison'):
+    if is_comparison(config):
         config['dataset_audit'] = audit_darkroom_dataset(config, config['traj_dir'])
 
     # Only main process prints and logs
@@ -409,7 +409,7 @@ if __name__ == '__main__':
             if is_main:
                 print(f'Found pre-trained compression at {pretrain_path}')
             model.load_pretrained_compression(pretrain_path)
-        elif config.get('compressor_comparison'):
+        elif is_comparison(config):
             raise FileNotFoundError(f'Comparison requires an explicit matching pretrained checkpoint: {pretrain_path}')
         elif is_main:
             print('WARNING: No pre-trained compression found. Training from scratch.')
@@ -611,7 +611,7 @@ if __name__ == '__main__':
             batch = next(train_dataloader)
             step = next_step
             
-            if config.get('compressor_comparison'):
+            if is_comparison(config):
                 output = comparison_optimizer_step(model, batch, optimizer, accelerator, config)
             else:
                 with accelerator.autocast():
@@ -623,7 +623,7 @@ if __name__ == '__main__':
             if len(compression_counts) > 1000:
                 compression_counts.pop(0)
 
-            if not config.get('compressor_comparison'):
+            if not is_comparison(config):
                 optimizer.zero_grad(set_to_none=True)
                 accelerator.backward(loss)
                 accelerator.clip_grad_norm_(model.parameters(), 1.0)

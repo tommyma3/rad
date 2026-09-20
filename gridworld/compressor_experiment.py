@@ -10,6 +10,11 @@ VARIANTS = ('ae', 'vae', 'vq_vae')
 PROTOCOL = 'darkroom-compressor-v1'
 
 
+def is_comparison(config):
+    """Shared reproducibility safeguards, with separate protocol identities."""
+    return bool(config.get('compressor_comparison') or config.get('memory_size_comparison'))
+
+
 def model_config_path(name):
     return name if Path(name).suffix in ('.yaml', '.yml') else f'./config/model/{name}.yaml'
 
@@ -65,18 +70,25 @@ def validate_checkpoint_config(expected, actual, same_stage=False):
             'n_compress_tokens']
     if expected.get('compressor_type', 'ae') == 'vq_vae':
         keys.append('vq_codebook_size')
-    if expected.get('compressor_comparison'):
+    if is_comparison(expected):
         keys += ['compressor_comparison', 'seed', 'env_split_seed', 'collection_env_split_seed',
                  'dataset_task_mapping', 'vae_kl_weight', 'vq_commitment_weight',
                  'train_n_stream', 'train_source_timesteps']
     if same_stage:
         keys += ['n_transit', 'always_use_latent_prefix', 'latent_update_mode']
+        keys += ['first_recent_capacity', 'recurrent_recent_capacity']
+    if expected.get('memory_size_comparison') or actual.get('memory_size_comparison'):
+        keys += ['memory_size_comparison', 'always_use_latent_prefix', 'latent_update_mode',
+                 'seed', 'env_split_seed', 'collection_env_split_seed', 'dataset_task_mapping',
+                 'train_n_stream', 'train_source_timesteps']
+        from memory_size_experiment import validate_memory_size_config
+        validate_memory_size_config(actual, pretrain=not same_stage or 'pretrain_timesteps' in expected)
     for key in keys:
         default = 'ae' if key == 'compressor_type' else None
         if expected.get(key, default) != actual.get(key, default):
             raise ValueError(f'Checkpoint mismatch for {key}: expected {expected.get(key, default)!r}, '
                              f'got {actual.get(key, default)!r}')
-    if expected.get('compressor_comparison') and 'dataset_audit' in expected:
+    if is_comparison(expected) and 'dataset_audit' in expected:
         for key in ('data_sha256', 'train_groups', 'test_groups', 'group_goals'):
             if expected['dataset_audit'].get(key) != actual.get('dataset_audit', {}).get(key):
                 raise ValueError(f'Checkpoint dataset mismatch for {key}')
@@ -92,9 +104,14 @@ def add_experiment_arguments(parser):
     parser.add_argument('--num_workers', type=int)
     parser.add_argument('--no_compile', action='store_true')
     parser.add_argument('--cpu', action='store_true', help='CPU smoke checks only')
+    parser.add_argument('--n_latents', type=int, help='Latent tokens for the memory-size protocol only')
 
 
 def apply_experiment_arguments(config, args, pretrain=False):
+    if getattr(args, 'n_latents', None) is not None:
+        if not config.get('memory_size_comparison'):
+            raise ValueError('--n_latents requires a memory-size experiment config')
+        config['n_compress_tokens'] = args.n_latents
     for key in ('seed', 'runs_root', 'run_name', 'traj_dir', 'num_workers'):
         value = getattr(args, key)
         if value is not None:
@@ -111,7 +128,11 @@ def apply_experiment_arguments(config, args, pretrain=False):
         config['torch_compile'] = False
     if args.cpu:
         config['mixed_precision'] = 'no'
-    if config.get('compressor_comparison'):
+    if config.get('memory_size_comparison'):
+        from memory_size_experiment import validate_memory_size_config, run_name
+        validate_memory_size_config(config, pretrain=pretrain)
+        config.setdefault('run_name', run_name(config['n_compress_tokens'], config.get('seed', 0), pretrain))
+    if is_comparison(config):
         if config['env'] != 'darkroom':
             raise ValueError('The compressor comparison protocol is Darkroom-only')
         config['data_seed'] = int(config.get('seed', 42))
@@ -123,7 +144,7 @@ def apply_experiment_arguments(config, args, pretrain=False):
 
 def make_data_generator(config):
     import torch
-    if not config.get('compressor_comparison'):
+    if not is_comparison(config):
         return None
     return torch.Generator().manual_seed(int(config['data_seed']))
 

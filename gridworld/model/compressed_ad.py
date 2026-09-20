@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from env import map_dark_states
+from memory_capacity import recent_capacities, policy_token_capacity
+from compressor_experiment import is_comparison
 from .compression import CompressionTransformer, ReconstructionDecoder
 from .gpt2 import GPT2Transformer
 
@@ -39,6 +41,11 @@ class RAD(nn.Module):
         self.device = config['device']
         self.n_transit = config['n_transit']
         self.max_seq_length = 3 * self.n_transit
+        self.fixed_recent_capacity = (config.get('first_recent_capacity') is not None
+                                      or config.get('recurrent_recent_capacity') is not None)
+        if self.fixed_recent_capacity:
+            self.max_seq_length = policy_token_capacity(config)
+        self.first_recent_tokens, self.recurrent_recent_tokens = recent_capacities(config)
         self.mixed_precision = config['mixed_precision']
         self.grid_size = config['grid_size']
         self.num_actions = config['num_actions']
@@ -324,6 +331,12 @@ class RAD(nn.Module):
     def _uses_latent_prefix_from_state(self, has_latent_tokens):
         return has_latent_tokens or self.always_use_latent_prefix
 
+    def _recent_capacity(self, has_latent_tokens):
+        if getattr(self, 'fixed_recent_capacity', False):
+            return self.recurrent_recent_tokens if has_latent_tokens else self.first_recent_tokens
+        prefix = self.n_compress_tokens if self._uses_latent_prefix_from_state(has_latent_tokens) else 0
+        return self.max_seq_length - prefix
+
     def _memory_sequence_len_from_state(self, has_latent_tokens, recent_len):
         latent_len = self.n_compress_tokens if self._uses_latent_prefix_from_state(has_latent_tokens) else 0
         return latent_len + recent_len
@@ -336,18 +349,16 @@ class RAD(nn.Module):
         respect_curriculum=True,
     ):
         num_compressions = 0
-        while self._memory_sequence_len_from_state(has_latent_tokens, recent_len) > self.max_seq_length:
+        while recent_len > self._recent_capacity(has_latent_tokens):
             if respect_curriculum and self.max_compressions is not None and compression_round >= self.max_compressions:
-                keep_len = self.max_seq_length
-                if self._uses_latent_prefix_from_state(has_latent_tokens):
-                    keep_len -= self.n_compress_tokens
+                keep_len = self._recent_capacity(has_latent_tokens)
                 recent_len = min(recent_len, max(0, keep_len))
                 break
 
             keep_len = min(self.short_memory_keep_tokens, recent_len)
             prefix_len = recent_len - keep_len
             if prefix_len <= 0:
-                keep_len = max(0, self.max_seq_length - self.n_compress_tokens)
+                keep_len = max(0, self._recent_capacity(True))
                 prefix_len = recent_len - keep_len
                 if prefix_len <= 0:
                     break
@@ -367,8 +378,7 @@ class RAD(nn.Module):
         cursor = 0
 
         while cursor < token_count:
-            latent_len = self.n_compress_tokens if self._uses_latent_prefix_from_state(has_latent_tokens) else 0
-            capacity = self.max_seq_length - latent_len
+            capacity = self._recent_capacity(has_latent_tokens)
             remaining = token_count - cursor
             room = capacity - recent_len
             take_len = remaining if remaining <= room else max(1, min(room + 1, remaining))
@@ -406,11 +416,9 @@ class RAD(nn.Module):
         if recent_context is None:
             return latent_tokens, recent_context, recent_state_mask, recent_targets, compression_info
 
-        while self._memory_sequence_len(latent_tokens, recent_context) > self.max_seq_length:
+        while recent_context.shape[1] > self._recent_capacity(latent_tokens is not None):
             if respect_curriculum and self.max_compressions is not None and compression_round >= self.max_compressions:
-                keep_len = self.max_seq_length
-                if self._uses_latent_prefix(latent_tokens):
-                    keep_len -= self.n_compress_tokens
+                keep_len = self._recent_capacity(latent_tokens is not None)
                 keep_len = max(0, keep_len)
                 recent_context = recent_context[:, -keep_len:] if keep_len > 0 else recent_context[:, :0]
                 if recent_state_mask is not None:
@@ -422,7 +430,7 @@ class RAD(nn.Module):
             keep_len = min(self.short_memory_keep_tokens, recent_context.shape[1])
             prefix_len = recent_context.shape[1] - keep_len
             if prefix_len <= 0:
-                keep_len = max(0, self.max_seq_length - self.n_compress_tokens)
+                keep_len = max(0, self._recent_capacity(True))
                 prefix_len = recent_context.shape[1] - keep_len
                 if prefix_len <= 0:
                     break
@@ -464,8 +472,7 @@ class RAD(nn.Module):
         cursor = 0
 
         while cursor < context_embed.shape[1]:
-            latent_len = self.n_compress_tokens if self._uses_latent_prefix(latent_tokens) else 0
-            capacity = self.max_seq_length - latent_len
+            capacity = self._recent_capacity(latent_tokens is not None)
             recent_len = 0 if recent_context is None else recent_context.shape[1]
             remaining = context_embed.shape[1] - cursor
             room = capacity - recent_len
@@ -643,7 +650,7 @@ class RAD(nn.Module):
         from utils import normalize_compiled_state_dict
         checkpoint = torch.load(pretrain_checkpoint_path, map_location=self.device, weights_only=False)
         validate_checkpoint_config(self.config, checkpoint['config'])
-        if self.config.get('compressor_comparison'):
+        if is_comparison(self.config):
             from pathlib import Path
             import hashlib
             source_config = checkpoint['config']
@@ -654,6 +661,11 @@ class RAD(nn.Module):
             settings = ('pretrain_timesteps', 'pretrain_batch_size', 'pretrain_lr',
                         'pretrain_warmup_steps', 'n_transit', 'always_use_latent_prefix',
                         'num_workers', 'mixed_precision', 'torch_compile')
+            if self.config.get('memory_size_comparison'):
+                settings += ('memory_size_comparison', 'n_compress_tokens', 'first_recent_capacity',
+                             'recurrent_recent_capacity', 'seed', 'train_n_stream', 'train_source_timesteps',
+                             'short_memory_keep', 'latent_update_mode', 'max_context_length',
+                             'beta1', 'beta2', 'weight_decay', 'gradient_accumulation_steps')
             self.config['pretrain_provenance'] = dict(
                 checkpoint=str(Path(pretrain_checkpoint_path).resolve()), sha256=digest,
                 step=checkpoint['step'], settings={key: source_config.get(key) for key in settings},
