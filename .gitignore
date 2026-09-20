@@ -13,3 +13,5 @@ __pycache__/
 **/*.txt
 output/
 tmp/
+**/flop_results
+flops_results
