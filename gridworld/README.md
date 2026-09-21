@@ -49,6 +49,18 @@ Summarize completed runs:
 python scripts/summarize_rad_latent_update_comparison.py --output runs/rad_latent_update_summary.csv
 ```
 
+This also saves `runs/rad_latent_update_comparison.pdf` (vector graphics with
+embedded TrueType fonts) and a 400-dpi PNG. The single-panel figure compares
+average episode reward against evaluation episode for the selected variants,
+using each run's `eval_result.npy` array of shape `(environments, episodes)`.
+Each point is the mean across evaluation environments, without smoothing or
+averaging over episodes. Curves retain their own evaluation lengths; missing
+results are reported and skipped. No figure is written if all results are missing.
+Colors and line styles distinguish methods, with a shared legend below the axes.
+Use `--plot_output figures/latent_updates` to choose the PDF/PNG filename stem,
+`--variants replace gru_gate` to select methods, or `--no_plot` for summary only.
+Relative output paths are resolved against the `gridworld` directory.
+
 ## DPT and IDT baselines (GPT-2)
 
 The baseline protocols follow [dicp/gridworld](https://github.com/jaehyeon-son/dicp/tree/e36b3f713fdca775728525dc621820a1989691f8/gridworld),
