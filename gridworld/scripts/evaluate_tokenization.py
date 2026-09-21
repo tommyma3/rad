@@ -26,7 +26,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from baseline_dataset import collection_task_ids
-from evaluate_ad_rad_curves import build_eval_envs, load_model, set_eval_seed
+from evaluate_ad_rad_curves import build_eval_envs, load_model, moving_average, set_eval_seed
 from model.transition_ad import TOKENIZED_MODELS
 from utils import normalize_compiled_state_dict
 
@@ -76,6 +76,7 @@ def main():
     parser.add_argument('--collection-env-split-seed', type=int,
                         help='Override collection ordering; defaults to checkpoint metadata, then Darkroom=0 / DKTD=2')
     parser.add_argument('--greedy', action='store_true')
+    parser.add_argument('--window', type=int, default=10, help='Centered moving-average smoothing window for the plot')
     parser.add_argument('--allow-partial', action='store_true', help='Allow fewer than four methods for smoke tests')
     args = parser.parse_args()
     if args.episodes < 1:
@@ -156,7 +157,7 @@ def main():
         del model, checkpoint
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-    figure, axis = plt.subplots(figsize=(7, 4))
+    figure, axis = plt.subplots(figsize=(5, 4))
     aggregates = {}
     for method in LABELS:
         if method not in curves:
@@ -164,16 +165,19 @@ def main():
         values = np.stack(curves[method])
         mean = values.mean(0)
         half_width = 1.96 * values.std(0, ddof=1) / np.sqrt(len(values)) if len(values) > 1 else np.zeros_like(mean)
+        mean = moving_average(mean, args.window)
+        half_width = moving_average(half_width, args.window)
         episodes = np.arange(1, len(mean) + 1)
         line, = axis.plot(episodes, mean, label=LABELS[method])
         if len(values) > 1:
             axis.fill_between(episodes, mean - half_width, mean + half_width, color=line.get_color(), alpha=.15)
-        aggregates[method] = {'training_seeds': len(values), 'episode_mean': mean.tolist(),
+        aggregates[method] = {'training_seeds': len(values), 'window': args.window, 'episode_mean': mean.tolist(),
                               'episode_95pct_half_width': half_width.tolist()}
-    axis.set(xlabel='Episode', ylabel='Episode return', title=f'{ENV_LABELS[environment[0]]} tokenization ablation')
+    axis.set(xlabel='Episode', ylabel='Episode return', title=f'{ENV_LABELS[environment[0]]}')
     axis.legend()
     figure.tight_layout()
-    figure.savefig(args.output_dir / 'comparison.png', dpi=200)
+    for fmt in ('png', 'pdf'):
+        figure.savefig(args.output_dir / f'comparison.{fmt}', dpi=200)
     plt.close(figure)
     (args.output_dir / 'metrics.json').write_text(json.dumps({'runs': results, 'aggregates': aggregates}, indent=2), encoding='utf-8')
 

@@ -435,12 +435,12 @@ def configure_plot_style() -> None:
             "savefig.dpi": 400,
             "font.family": "serif",
             "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
-            "font.size": 10,
-            "axes.labelsize": 11,
-            "axes.titlesize": 12,
-            "legend.fontsize": 11,
-            "xtick.labelsize": 9,
-            "ytick.labelsize": 9,
+            "font.size": 13,
+            "axes.labelsize": 15,
+            "axes.titlesize": 16,
+            "legend.fontsize": 13,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
             "axes.spines.top": False,
             "axes.spines.right": False,
             "axes.grid": True,
@@ -538,7 +538,7 @@ def plot_environment(
     if not envs:
         return []
 
-    fig, axes = plt.subplots(1, len(envs), figsize=(5.4 * len(envs), 4.6), squeeze=False)
+    fig, axes = plt.subplots(1, len(envs), figsize=(5.0 * len(envs), 4.6), squeeze=False)
     saved_paths = []
     legend_handles = {}
 
