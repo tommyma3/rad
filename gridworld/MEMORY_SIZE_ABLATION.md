@@ -98,10 +98,18 @@ python scripts/evaluate_memory_size_comparison.py \
   --runs-root runs/memory_size_darkroom --device cuda
 ```
 
-The evaluator loads the final 100,000-update policy checkpoint for each run and
-checks the actual 40,000-update pretrained checkpoint against its recorded SHA256.
+Training inherits `save_best_model: True` from regular RAD. The evaluator always
+loads `best-model.pt`, selected by the highest mean reward from regular RAD's
+in-training test-goal evaluation (the same model used by `evaluate_rad.py --use_best`).
+The selected step can precede the final 100,000 updates; the final checkpoint must
+still exist as the completed-budget artifact. There is no fallback to final weights.
+The evaluator checks the actual 40,000-update pretrained checkpoint against its recorded SHA256.
 It validates shared configuration/data identities and loads model state strictly.
 Reduced training budgets require `--pilot --checkpoint-step N --pretrain-steps N`.
+Here `--checkpoint-step` specifies the training budget, not the selected best step.
+Short pilot training caps the online evaluation interval at the pilot budget so
+that it also saves a best model. Existing compressor pretraining can be reused;
+old policy runs with best-model saving disabled need to be retrained.
 Repeated evaluations require a fresh `--output-dir`.
 
 Each policy runs 100 consecutive episodes on all 8 held-out goals with the same
@@ -111,12 +119,13 @@ event boundaries must agree across sizes and seeds.
 
 Artifacts under `comparison/` include:
 
-- `protocol.json`: evaluation settings, device, and software version.
+- `protocol.json`: best-checkpoint selection, evaluation settings, device, and software version.
 - `memoryN-trainS.npz`: returns with axes `[evaluation seed, goal, episode]`, goals,
-  evaluation seeds, compression counts/events, and checkpoint path.
+  evaluation seeds, compression counts/events, checkpoint path, selected step, and selection reward.
 - `per_training_seed.csv`: overall, first-10, first-50, last-20, and after-50
   episode returns; parameter counts; first/recurrent compression latency;
-  evaluation and training runtime; GPU peak memory; final pretraining MSE.
+  evaluation and training runtime; GPU peak memory; final pretraining MSE;
+  best-checkpoint path, selected step, and selection reward.
 - `summary.csv`: mean, standard deviation, and SEM **across training seeds**,
   after averaging task/evaluation trials within each training run.
 - `paired_vs_15.csv` and `paired_summary_vs_15.csv`: paired return differences

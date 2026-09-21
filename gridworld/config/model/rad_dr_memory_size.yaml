@@ -15,7 +15,7 @@ first_recent_capacity: 30
 recurrent_recent_capacity: 25
 short_memory_keep: 5
 latent_update_mode: gru_gate
-save_best_model: False
+# Inherit save_best_model: True from regular RAD training.
 torch_compile: False
 
 pretrain:

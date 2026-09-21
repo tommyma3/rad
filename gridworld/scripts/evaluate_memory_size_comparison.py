@@ -1,4 +1,4 @@
-"""Evaluate final Darkroom memory-size checkpoints with paired task/seed trials."""
+"""Evaluate best Darkroom memory-size checkpoints with paired task/seed trials."""
 
 import argparse
 import hashlib
@@ -19,7 +19,7 @@ from model.compressed_ad import RAD
 from env import SAMPLE_ENVIRONMENT, make_env
 from stable_baselines3.common.vec_env import DummyVecEnv
 from utils import normalize_compiled_state_dict
-from evaluate_compressor_comparison import metrics, write_csv, synchronize
+from evaluate_compressor_comparison import metrics, write_csv, synchronize, validate_checkpoint_selection
 
 
 def comparison_signature(config):
@@ -28,6 +28,22 @@ def comparison_signature(config):
                 'runs_root', 'traj_dir', 'dataset_audit', 'pretrain_checkpoint',
                 'pretrain_provenance', 'amp_retries'}
     return {key: value for key, value in config.items() if key not in excluded}
+
+
+def load_best_checkpoint(run, size, seed, training_steps):
+    """Use regular RAD reward selection while requiring the completed-budget artifact."""
+    final_path = run / f'ckpt-{training_steps}.pt'
+    if not final_path.is_file():
+        raise FileNotFoundError(f'Missing completed training checkpoint: {final_path}')
+    checkpoint_path = run / 'best-model.pt'
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    config = dict(checkpoint['config'])
+    validate_memory_size_config(config)
+    if (config['n_compress_tokens'] != size or config['seed'] != seed or config['data_seed'] != seed
+            or config['train_timesteps'] != training_steps):
+        raise ValueError(f'Checkpoint size/seed/budget mismatch: {checkpoint_path}')
+    validate_checkpoint_selection(checkpoint, config, 'best', training_steps)
+    return checkpoint_path, checkpoint, config
 
 
 def aggregate(rows):
@@ -120,7 +136,8 @@ def main():
     parser.add_argument('--train-seeds', nargs='+', type=int, default=[0, 1, 2])
     parser.add_argument('--eval-seeds', nargs='+', type=int, default=list(range(20)))
     parser.add_argument('--episodes', type=int, default=100)
-    parser.add_argument('--checkpoint-step', type=int, default=100000)
+    parser.add_argument('--checkpoint-step', type=int, default=100000,
+                        help='Completed policy training budget; curves always use best-model.pt')
     parser.add_argument('--pretrain-steps', type=int, default=40000)
     parser.add_argument('--pilot', action='store_true')
     parser.add_argument('--device', default='cuda')
@@ -142,6 +159,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     protocol = dict(protocol=PROTOCOL, pilot=args.pilot, sizes=args.sizes, train_seeds=args.train_seeds,
                     eval_seeds=args.eval_seeds, episodes=args.episodes, checkpoint_step=args.checkpoint_step,
+                    checkpoint_selection='best', selection_metric='in_training_eval_mean_reward',
                     pretrain_steps=args.pretrain_steps, action_sampling=True, device=str(device),
                     torch_version=torch.__version__, benchmark_repeats=args.benchmark_repeats,
                     device_name=torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU')
@@ -151,13 +169,9 @@ def main():
     for seed in args.train_seeds:
         for size in args.sizes:
             run = args.runs_root / run_name(size, seed)
-            checkpoint_path = run / f'ckpt-{args.checkpoint_step}.pt'
-            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            config = dict(checkpoint['config'])
-            validate_memory_size_config(config)
-            if (config['n_compress_tokens'] != size or config['seed'] != seed or config['data_seed'] != seed
-                    or checkpoint['step'] != args.checkpoint_step or config['train_timesteps'] != args.checkpoint_step):
-                raise ValueError(f'Checkpoint size/seed/budget mismatch: {checkpoint_path}')
+            checkpoint_path, checkpoint, config = load_best_checkpoint(run, size, seed, args.checkpoint_step)
+            selected_step = checkpoint['step']
+            selection_reward = float(checkpoint['eval_reward'])
             audit = config.get('dataset_audit', {})
             if (len(audit.get('train_groups', [])) != 73 or len(audit.get('test_groups', [])) != 8
                     or set(audit['train_groups']) & set(audit['test_groups'])):
@@ -219,8 +233,11 @@ def main():
             np.savez_compressed(output / f'memory{size}-train{seed}.npz', rewards=rewards,
                                 goals=np.asarray(goals), eval_seeds=args.eval_seeds, n_latents=size,
                                 compressions=compressions, compression_events=np.asarray(events),
-                                checkpoint=str(checkpoint_path.resolve()))
+                                checkpoint=str(checkpoint_path.resolve()), checkpoint_step=selected_step,
+                                selection_eval_reward=selection_reward, checkpoint_selection='best')
             row = dict(n_latents=size, train_seed=seed, **metrics(rewards),
+                       checkpoint=str(checkpoint_path.resolve()), checkpoint_step=selected_step,
+                       selection_eval_reward=selection_reward, checkpoint_selection='best',
                        parameter_count=sum(p.numel() for p in model.parameters()),
                        compressor_parameter_count=sum(p.numel() for p in model.compression_transformer.parameters()),
                        latent_values=size * config['tf_n_embd'], policy_token_capacity=policy_token_capacity(config),

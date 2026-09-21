@@ -120,6 +120,9 @@ def apply_experiment_arguments(config, args, pretrain=False):
         if args.steps < 1:
             raise ValueError('--steps must be positive')
         config['pretrain_timesteps' if pretrain else 'train_timesteps'] = args.steps
+        if config.get('memory_size_comparison') and not pretrain:
+            # Short pilots must run online evaluation to produce best-model.pt.
+            config['gen_interval'] = min(config.get('gen_interval', 10000), args.steps)
     if args.batch_size is not None:
         if args.batch_size < 1:
             raise ValueError('--batch_size must be positive')

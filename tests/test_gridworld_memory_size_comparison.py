@@ -14,14 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'gridworld'))
 sys.path.insert(0, str(ROOT / 'gridworld/scripts'))
 from test_gridworld_compressor_comparison import config as toy_config, batch, synthetic_history
-from compressor_experiment import audit_darkroom_dataset, validate_checkpoint_config
+from compressor_experiment import audit_darkroom_dataset, validate_checkpoint_config, apply_experiment_arguments
 from dataset import RADDataset, CompressionPretrainDataset
 from memory_capacity import recent_capacities
 from memory_size_experiment import PROTOCOL, SIZES, validate_memory_size_config
 from model.compressed_ad import RAD
 from train_rad import get_rad_data_loader
 from train_pretrain_compression import get_pretrain_data_loader
-from evaluate_memory_size_comparison import aggregate, paired_differences, comparison_signature, metrics
+from evaluate_memory_size_comparison import aggregate, paired_differences, comparison_signature, metrics, load_best_checkpoint
 from run_memory_size_comparison import training_commands, evaluation_command
 from env import make_env, SAMPLE_ENVIRONMENT
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -36,7 +36,7 @@ def config(size=15, pretrain=False):
                recurrent_recent_capacity=35 if pretrain else 25,
                short_memory_keep=5, min_context_length=20, max_context_length=120,
                train_source_timesteps=120, train_timesteps=2, pretrain_timesteps=2,
-               torch_compile=False, save_best_model=False)
+               torch_compile=False, save_best_model=True)
     if not pretrain:
         cfg.pop('pretrain_timesteps')
     return cfg
@@ -46,6 +46,44 @@ class MemorySizeComparisonTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(1)
+
+    def test_best_checkpoint_selection_and_no_final_fallback(self):
+        cfg = {**config(), 'train_timesteps': 4, 'gen_interval': 2}
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            torch.save(dict(config=cfg, step=4, model={'weight': torch.tensor(4)}), run / 'ckpt-4.pt')
+            with self.assertRaises(FileNotFoundError):
+                load_best_checkpoint(run, 15, cfg['seed'], 4)
+            best = dict(config=cfg, step=2, eval_reward=10., model={'weight': torch.tensor(2)})
+            torch.save(best, run / 'best-model.pt')
+            filename, checkpoint, _ = load_best_checkpoint(run, 15, cfg['seed'], 4)
+            self.assertEqual(filename.name, 'best-model.pt')
+            self.assertEqual(checkpoint['step'], 2)
+            self.assertEqual(checkpoint['model']['weight'].item(), 2)
+            for wrong in ({**best, 'step': 6}, {**best, 'step': 1},
+                          {key: value for key, value in best.items() if key != 'eval_reward'},
+                          {**best, 'config': {**cfg, 'save_best_model': False}},
+                          {**best, 'config': {**cfg, 'train_timesteps': 6}}):
+                torch.save(wrong, run / 'best-model.pt')
+                with self.assertRaises(ValueError):
+                    load_best_checkpoint(run, 15, cfg['seed'], 4)
+            torch.save(best, run / 'best-model.pt')
+            for size, seed in ((3, cfg['seed']), (15, cfg['seed'] + 1)):
+                with self.assertRaises(ValueError):
+                    load_best_checkpoint(run, size, seed, 4)
+            (run / 'ckpt-4.pt').unlink()
+            with self.assertRaises(FileNotFoundError):
+                load_best_checkpoint(run, 15, cfg['seed'], 4)
+
+    def test_pilot_evaluates_within_budget_and_old_pretraining_is_reusable(self):
+        args = SimpleNamespace(steps=2, batch_size=None, no_compile=False, cpu=False,
+                               seed=None, runs_root=None, run_name=None, traj_dir=None, num_workers=None)
+        cfg = {**config(), 'gen_interval': 10000}
+        apply_experiment_arguments(cfg, args)
+        self.assertEqual(cfg['gen_interval'], 2)
+        self.assertTrue(cfg['save_best_model'])
+        pretrained = {**config(pretrain=True), 'save_best_model': False}
+        validate_checkpoint_config(cfg, pretrained)
 
     def test_fifteen_latents_matches_legacy_policy(self):
         cfg = config()

@@ -18,7 +18,9 @@ def validate_memory_size_config(config, pretrain=False):
                     latent_update_mode='gru_gate', short_memory_keep=5,
                     first_recent_capacity=35 if pretrain else 30,
                     recurrent_recent_capacity=35 if pretrain else 25,
-                    n_transit=40 if pretrain else 30, torch_compile=False, save_best_model=False)
+                    n_transit=40 if pretrain else 30, torch_compile=False)
+    if not pretrain:
+        expected['save_best_model'] = True
     if config.get('compressor_comparison'):
         raise ValueError('Memory-size and compressor-comparison protocols are separate experiments')
     for key, value in expected.items():
