@@ -101,8 +101,11 @@ uv run python scripts/run_compressor_comparison.py --stage pilot --gpu 0
 # After inspecting pilot losses, posterior statistics, and codebook usage:
 uv run python scripts/run_compressor_comparison.py --stage train --gpu 0
 
-# All eight goals, 20 evaluation seeds, 100 consecutive episodes.
+# All eight goals, 20 evaluation seeds, 100 consecutive episodes, final checkpoint.
 uv run python scripts/run_compressor_comparison.py --stage evaluate --gpu 0
+
+# Additionally evaluate the test-selected best-model.pt checkpoints into comparison-best/.
+uv run python scripts/run_compressor_comparison.py --stage evaluate --checkpoint both --gpu 0
 ```
 
 The launcher defaults to `runs/compressor_darkroom`, with pilots under `pilot/`.
@@ -118,12 +121,19 @@ Individual entrypoints also accept `--seed`, `--runs_root`, `--run_name`,
 
 ## Evaluation and artifacts
 
-Use the final 100k checkpoint, never a checkpoint selected by test reward.
+Use the final 100k checkpoint as the controlled result; it is never selected by
+test reward. Training saves `best-model.pt` anyway (`save_best_model: True`),
+and the evaluator accepts `--checkpoint best` to evaluate it: the checkpoint
+that maximized the in-training in-context eval on the eight test goals. Best
+curves are secondary, test-selected results — they quantify how much of a
+final-checkpoint gap is checkpoint selection, not how a variant trains on
+average. Report the two modes side by side, never intermixed.
 Evaluation retains memory across episodes and resets it for every evaluation seed.
 The evaluator also checks that checkpoint source hashes and shared model/training
 settings agree. All eight goals are evaluated with the same sampled-action seeds.
 
-Outputs under `comparison/`:
+Outputs under `comparison/` (final checkpoint) or `comparison-best/` (best
+checkpoint; the loaded step is recorded per run since it varies):
 
 - Raw NPZ: evaluation-seed x goal x episode rewards, goal coordinates, compression
   counts, evaluation seeds, and source checkpoint path for each variant/train seed.
@@ -159,7 +169,8 @@ python -m pytest ../tests/test_gridworld_compressor_comparison.py -q
 
 CPU tests cover legacy AE behavior, matched shared initialization, VAE KL and RNG,
 VQ gradient paths and codebook updates, both training objectives, recent-round
-loss averaging, no-compression cases, checkpoint rejection/round trips, task-map
-auditing, data-stream independence, and aggregation units. Small synthetic-history
+loss averaging, no-compression cases, checkpoint rejection/round trips and
+final/best selection rules, task-map auditing, data-stream independence, and
+aggregation units. Small synthetic-history
 end-to-end checks validate the training entrypoints and evaluation artifacts;
 they do not establish convergence on the real PPO histories.

@@ -59,6 +59,25 @@ def benchmark_compression(model, device, batch_size, repeats):
     return 1000 * (time.perf_counter() - start) / repeats
 
 
+def selection_step_ok(step, checkpoint_kind, checkpoint_step, train_timesteps, gen_interval):
+    """Final selection requires the exact budget checkpoint; best is any eval-step checkpoint."""
+    if checkpoint_kind == 'final':
+        return step == checkpoint_step
+    return 1 <= step <= train_timesteps and step % gen_interval == 0
+
+
+def validate_checkpoint_selection(checkpoint, config, checkpoint_kind, checkpoint_step):
+    """Best checkpoints carry test-reward selection provenance; final ones do not."""
+    if not selection_step_ok(checkpoint['step'], checkpoint_kind, checkpoint_step,
+                             config['train_timesteps'], config.get('gen_interval', 10000)):
+        raise ValueError(f'Checkpoint step {checkpoint["step"]} is invalid for {checkpoint_kind} selection')
+    if checkpoint_kind == 'best':
+        if not config.get('save_best_model'):
+            raise ValueError('best checkpoint requested but this run trained with save_best_model off')
+        if 'eval_reward' not in checkpoint:
+            raise ValueError('best checkpoint lacks eval_reward selection provenance')
+
+
 def aggregate(rows):
     result = []
     for variant, mode in sorted({(row['variant'], row['latent_mode']) for row in rows}):
@@ -83,6 +102,9 @@ def main():
     parser.add_argument('--eval-seeds', nargs='+', type=int, default=list(range(20)))
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--checkpoint-step', type=int, default=100000, help='Change only for pilot evaluation')
+    parser.add_argument('--checkpoint', choices=['final', 'best'], default='final',
+                        help='final: ckpt-<checkpoint-step>; best: best-model.pt selected by the '
+                             'in-training test-goal eval (reported as test-selected)')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--benchmark-repeats', type=int, default=50)
     parser.add_argument('--threads', type=int, default=4)
@@ -94,9 +116,9 @@ def main():
             parser.error('Variants and seed lists must not contain duplicates')
     torch.set_num_threads(args.threads)
     device = torch.device(args.device)
-    output = args.output_dir or args.runs_root / 'comparison'
+    output = args.output_dir or args.runs_root / ('comparison-best' if args.checkpoint == 'best' else 'comparison')
     output.mkdir(parents=True, exist_ok=False)
-    protocol = dict(protocol=PROTOCOL, checkpoint_step=args.checkpoint_step,
+    protocol = dict(protocol=PROTOCOL, checkpoint=args.checkpoint, checkpoint_step=args.checkpoint_step,
                     train_seeds=args.train_seeds, eval_seeds=args.eval_seeds,
                     episodes=args.episodes, action_sampling=True, device=str(device),
                     benchmark_repeats=args.benchmark_repeats, torch_version=torch.__version__)
@@ -109,15 +131,18 @@ def main():
     for seed in args.train_seeds:
         for variant in args.variants:
             run = args.runs_root / f'RAD-darkroom-{variant}-split0-train{seed}'
-            checkpoint_path = run / f'ckpt-{args.checkpoint_step}.pt'
+            checkpoint_name = 'best-model.pt' if args.checkpoint == 'best' else f'ckpt-{args.checkpoint_step}.pt'
+            checkpoint_path = run / checkpoint_name
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             config = dict(checkpoint['config'])
             if (config.get('compressor_comparison') != PROTOCOL or config.get('compressor_type') != variant
                     or config.get('seed') != seed or config.get('env_split_seed') != 0
                     or config.get('env') != 'darkroom' or config.get('grid_size') != 9 or config.get('horizon') != 20
-                    or checkpoint['step'] != args.checkpoint_step
                     or config['train_timesteps'] != args.checkpoint_step):
                 raise ValueError(f'Checkpoint protocol mismatch: {checkpoint_path}')
+            validate_checkpoint_selection(checkpoint, config, args.checkpoint, args.checkpoint_step)
+            print(f'Loaded {args.checkpoint} checkpoint from {checkpoint_path} (step {checkpoint["step"]})',
+                  flush=True)
             audit = config.get('dataset_audit')
             if not audit or len(audit['test_groups']) != 8:
                 raise ValueError('Missing verified eight-goal Darkroom split')
@@ -170,8 +195,10 @@ def main():
                     raise ValueError(f'Unexpected reward shape: {rewards.shape}')
                 np.savez_compressed(output / f'{variant}-train{seed}-{mode}.npz', rewards=rewards,
                                     goals=np.asarray(goals), eval_seeds=args.eval_seeds,
-                                    compressions=compressions, checkpoint=str(checkpoint_path))
-                row = dict(variant=variant, latent_mode=mode, train_seed=seed, **metrics(rewards),
+                                    compressions=compressions, checkpoint=str(checkpoint_path),
+                                    checkpoint_step=int(checkpoint['step']))
+                row = dict(variant=variant, latent_mode=mode, train_seed=seed,
+                           checkpoint_step=int(checkpoint['step']), **metrics(rewards),
                            parameter_count=sum(p.numel() for p in model.parameters()),
                            compression_ms=benchmark_compression(model, device, 8, args.benchmark_repeats),
                            peak_gpu_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else 0)

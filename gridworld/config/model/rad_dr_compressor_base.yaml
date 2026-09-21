@@ -11,7 +11,10 @@ vae_kl_warmup_steps: 5000
 vae_eval_mode: mean
 vq_codebook_size: 256
 vq_commitment_weight: 0.25
-save_best_model: False
+# Save best-model.pt (selected by the in-training test-goal eval) alongside the
+# final checkpoint. The controlled comparison result remains the final 100k
+# checkpoint; the best checkpoint feeds the secondary, test-selected curve.
+save_best_model: True
 # Independent latent generators and dynamic auxiliary losses run eagerly for
 # this first comparison. All three variants use the same execution mode.
 torch_compile: False

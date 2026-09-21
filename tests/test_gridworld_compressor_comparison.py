@@ -259,6 +259,27 @@ class CompressorComparisonTest(unittest.TestCase):
         self.assertEqual(summary['mean'], 2.)
         self.assertEqual(summary['std_over_training_seeds'], 2.)
 
+    def test_checkpoint_selection_rules(self):
+        spec = importlib.util.spec_from_file_location('compressor_eval', ROOT / 'gridworld/scripts/evaluate_compressor_comparison.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cfg = dict(train_timesteps=100000, gen_interval=10000, save_best_model=True)
+        # Final selection requires the exact budget checkpoint.
+        module.validate_checkpoint_selection(dict(step=100000), cfg, 'final', 100000)
+        with self.assertRaisesRegex(ValueError, 'invalid for final'):
+            module.validate_checkpoint_selection(dict(step=90000), cfg, 'final', 100000)
+        # Best selection accepts any eval-step checkpoint within the budget.
+        module.validate_checkpoint_selection(dict(step=70000, eval_reward=9.0), cfg, 'best', 100000)
+        for bad_step in (0, 75000, 110000):
+            with self.assertRaisesRegex(ValueError, 'invalid for best'):
+                module.validate_checkpoint_selection(dict(step=bad_step, eval_reward=9.0), cfg, 'best', 100000)
+        # Best checkpoints must carry test-selection provenance.
+        with self.assertRaisesRegex(ValueError, 'save_best_model'):
+            module.validate_checkpoint_selection(dict(step=70000, eval_reward=9.0),
+                                                 {**cfg, 'save_best_model': False}, 'best', 100000)
+        with self.assertRaisesRegex(ValueError, 'eval_reward'):
+            module.validate_checkpoint_selection(dict(step=70000), cfg, 'best', 100000)
+
     def test_amp_retry_reuses_batch_and_latent_noise(self):
         cfg = config('vae')
         model = RAD(cfg)
