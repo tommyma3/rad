@@ -280,6 +280,26 @@ class CompressorComparisonTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'eval_reward'):
             module.validate_checkpoint_selection(dict(step=70000), cfg, 'best', 100000)
 
+    def test_evaluator_requires_standard_train_rad_protocol(self):
+        spec = importlib.util.spec_from_file_location('compressor_eval', ROOT / 'gridworld/scripts/evaluate_compressor_comparison.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        good = dict(compressor_type='ae', seed=0, env_split_seed=0, env='darkroom', grid_size=9,
+                    horizon=20, train_timesteps=100000)
+        module.validate_run_protocol(good, 'ae', 0, 100000, 'ckpt.pt')
+        for bad, message in (
+                (dict(good, compressor_comparison=PROTOCOL), 'compressor_comparison'),
+                (dict(good, memory_size_comparison='darkroom-memory-size-v1'), 'memory_size_comparison'),
+                (dict(good, dataset_task_mapping='collection_order'), 'dataset_task_mapping'),
+                (dict(good, dataset_audit={'test_groups': list(range(73, 81))}), 'dataset_audit'),
+                (dict(good, compressor_type='vae'), 'compressor_type'),
+                (dict(good, seed=1), 'seed'),
+                (dict(good, env_split_seed=1), 'env_split_seed'),
+                (dict(good, train_timesteps=90000), 'train_timesteps'),
+                (dict(good, env='dktd'), 'env')):
+            with self.assertRaisesRegex(ValueError, message):
+                module.validate_run_protocol(bad, 'ae', 0, 100000, 'ckpt.pt')
+
     def test_amp_retry_reuses_batch_and_latent_noise(self):
         cfg = config('vae')
         model = RAD(cfg)

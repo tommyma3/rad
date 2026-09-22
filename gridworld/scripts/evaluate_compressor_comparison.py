@@ -1,4 +1,4 @@
-"""Evaluate final Darkroom AE/VAE/VQ-VAE checkpoints with paired seeds."""
+"""Evaluate final Darkroom AE/VAE/VQ-VAE checkpoints trained under the standard train_rad.py protocol."""
 
 import argparse
 import csv
@@ -66,6 +66,31 @@ def selection_step_ok(step, checkpoint_kind, checkpoint_step, train_timesteps, g
     return 1 <= step <= train_timesteps and step % gen_interval == 0
 
 
+def validate_run_protocol(config, variant, seed, checkpoint_step, checkpoint_path):
+    """Runs must follow the standard train_rad.py protocol; only compressor_type varies."""
+    problems = []
+    if config.get('compressor_comparison') is not None:
+        problems.append(f"compressor_comparison={config.get('compressor_comparison')!r}")
+    if config.get('memory_size_comparison') is not None:
+        problems.append(f"memory_size_comparison={config.get('memory_size_comparison')!r}")
+    if config.get('dataset_task_mapping', 'legacy') != 'legacy':
+        problems.append(f"dataset_task_mapping={config.get('dataset_task_mapping')!r}")
+    if config.get('dataset_audit'):
+        problems.append('dataset_audit is present')
+    if config.get('compressor_type') != variant:
+        problems.append(f"compressor_type={config.get('compressor_type')!r}")
+    if config.get('seed') != seed:
+        problems.append(f"seed={config.get('seed')!r}")
+    if config.get('env_split_seed') != 0:
+        problems.append(f"env_split_seed={config.get('env_split_seed')!r}")
+    for key, expected in (('env', 'darkroom'), ('grid_size', 9), ('horizon', 20),
+                          ('train_timesteps', checkpoint_step)):
+        if config.get(key) != expected:
+            problems.append(f'{key}={config.get(key)!r}')
+    if problems:
+        raise ValueError(f'Checkpoint protocol mismatch for {checkpoint_path}: ' + '; '.join(problems))
+
+
 def validate_checkpoint_selection(checkpoint, config, checkpoint_kind, checkpoint_step):
     """Best checkpoints carry test-reward selection provenance; final ones do not."""
     if not selection_step_ok(checkpoint['step'], checkpoint_kind, checkpoint_step,
@@ -125,32 +150,18 @@ def main():
     protocol['device_name'] = torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'
     (output / 'protocol.json').write_text(json.dumps(protocol, indent=2))
     rows, curves = [], {}
-    reference_audit = None
     reference_config = None
-    reference_pretraining = None
     for seed in args.train_seeds:
         for variant in args.variants:
-            run = args.runs_root / f'RAD-darkroom-{variant}-split0-train{seed}'
+            run = args.runs_root / f'RAD-darkroom-{variant}-seed{seed}'
             checkpoint_name = 'best-model.pt' if args.checkpoint == 'best' else f'ckpt-{args.checkpoint_step}.pt'
             checkpoint_path = run / checkpoint_name
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             config = dict(checkpoint['config'])
-            if (config.get('compressor_comparison') != PROTOCOL or config.get('compressor_type') != variant
-                    or config.get('seed') != seed or config.get('env_split_seed') != 0
-                    or config.get('env') != 'darkroom' or config.get('grid_size') != 9 or config.get('horizon') != 20
-                    or config['train_timesteps'] != args.checkpoint_step):
-                raise ValueError(f'Checkpoint protocol mismatch: {checkpoint_path}')
+            validate_run_protocol(config, variant, seed, args.checkpoint_step, checkpoint_path)
             validate_checkpoint_selection(checkpoint, config, args.checkpoint, args.checkpoint_step)
             print(f'Loaded {args.checkpoint} checkpoint from {checkpoint_path} (step {checkpoint["step"]})',
                   flush=True)
-            audit = config.get('dataset_audit')
-            if not audit or len(audit['test_groups']) != 8:
-                raise ValueError('Missing verified eight-goal Darkroom split')
-            identity = {key: audit[key] for key in ('data_sha256', 'train_groups',
-                                                   'test_groups', 'group_goals', 'collection_env_split_seed')}
-            if reference_audit is not None and identity != reference_audit:
-                raise ValueError('Checkpoints were trained against different dataset identities')
-            reference_audit = identity
             shared_keys = ('tf_n_embd', 'tf_n_layer', 'tf_n_head', 'tf_dim_feedforward', 'compress_n_layers',
                            'compress_n_heads', 'n_compress_tokens', 'n_transit', 'short_memory_keep',
                            'latent_update_mode', 'always_use_latent_prefix', 'max_gradient_rounds',
@@ -163,12 +174,6 @@ def main():
             if reference_config is not None and shared != reference_config:
                 raise ValueError('Shared model/training settings differ across comparison checkpoints')
             reference_config = shared
-            provenance = config.get('pretrain_provenance')
-            if not provenance or provenance['step'] != provenance['settings']['pretrain_timesteps']:
-                raise ValueError('Missing completed-pretraining provenance')
-            if reference_pretraining is not None and provenance['settings'] != reference_pretraining:
-                raise ValueError('Pretraining settings/budgets differ across checkpoints')
-            reference_pretraining = provenance['settings']
             config.update(device=device, torch_compile=False)
             model = RAD(config).to(device).eval()
             model.load_state_dict(normalize_compiled_state_dict(checkpoint['model']), strict=True)
@@ -203,7 +208,7 @@ def main():
                            compression_ms=benchmark_compression(model, device, 8, args.benchmark_repeats),
                            peak_gpu_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else 0)
                 train_metrics_path = run / 'train-metrics.json'
-                pretrain_run = args.runs_root / f'RAD-pretrain-darkroom-{variant}-split0-train{seed}'
+                pretrain_run = args.runs_root / f'RAD-pretrain-darkroom-{variant}-seed{seed}'
                 pretrain_metrics_path = pretrain_run / 'pretrain-metrics.json'
                 train_metrics = json.loads(train_metrics_path.read_text()) if train_metrics_path.exists() else {}
                 pretrain_metrics = json.loads(pretrain_metrics_path.read_text()) if pretrain_metrics_path.exists() else {}

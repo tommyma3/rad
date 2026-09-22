@@ -53,9 +53,39 @@ compilation. AMP-skipped updates retry the same batch before advancing the budge
 
 ## Running
 
-Run these commands from `gridworld/` with its training dependencies installed.
-`--traj-dir` defaults to `datasets/`; `--runs-root` defaults to
-`runs/memory_size_darkroom/`.
+`scripts/evaluate_memory_size_comparison.py` is the end-to-end multi-GPU
+pipeline: it trains every size/seed, evaluates each best model with
+`evaluate_rad.py`, and draws the comparison figure. Run these commands from
+`gridworld/` with its training dependencies installed. `--traj-dir` defaults to
+`datasets/`; `--runs-root` defaults to `runs/memory_size_darkroom/`.
+
+```bash
+# Review all training/evaluation commands without executing them.
+python scripts/evaluate_memory_size_comparison.py --gpus 0 1 2 --dry-run
+
+# Full sweep: each size/seed pretrains and trains (seed chains round-robin
+# over the GPUs, one job per GPU at a time), then every best model is
+# evaluated, then the figure is drawn.
+python scripts/evaluate_memory_size_comparison.py --gpus 0 1 2
+
+# Individual stages, e.g. re-plot after existing evaluation results.
+python scripts/evaluate_memory_size_comparison.py --stage train --gpus 0 1 2
+python scripts/evaluate_memory_size_comparison.py --stage evaluate --gpus 0 1 2
+python scripts/evaluate_memory_size_comparison.py --stage plot
+
+# End-to-end smoke test on one GPU (minutes, not results).
+python scripts/evaluate_memory_size_comparison.py --gpus 0 --sizes 3 6 --seeds 0 \
+    --steps 100 --batch-size 8 --episodes 10 \
+    --runs-root runs/memory_size_pipeline_pilot
+```
+
+`--gpus` defaults to every visible GPU. `--skip-existing` skips pretraining
+with an existing `pretrain-final.pt` and policy training with an existing
+`best-model.pt` (treated as completed runs); without it, fresh-run collision
+rules from the training scripts still apply. `--steps`/`--batch-size` override
+both training budgets and are intended for smoke tests only.
+
+The single-GPU staged launcher remains available:
 
 ```bash
 # Review the 15 paired pretrain/train runs and final evaluation command.
@@ -66,7 +96,7 @@ python scripts/run_memory_size_comparison.py --stage all --dry-run
 # followed by 10 evaluation episodes. These are pipeline checks, not results.
 python scripts/run_memory_size_comparison.py --stage pilot --gpu 0
 
-# Full sweep: each size/seed pretrains, trains, then all policies are evaluated.
+# Full sweep on one GPU: each size/seed pretrains, trains, then all policies are evaluated.
 python scripts/run_memory_size_comparison.py --stage all --gpu 0
 ```
 
@@ -93,50 +123,37 @@ batch sizes across every size and record the changed protocol settings.
 
 ## Evaluation and artifacts
 
+The pipeline's evaluate stage runs, for every size/seed:
+
 ```bash
-python scripts/evaluate_memory_size_comparison.py \
-  --runs-root runs/memory_size_darkroom --device cuda
+python evaluate_rad.py --ckpt_dir <run> --use_best --eval_episodes 100
 ```
 
-Training inherits `save_best_model: True` from regular RAD. The evaluator always
-loads `best-model.pt`, selected by the highest mean reward from regular RAD's
-in-training test-goal evaluation (the same model used by `evaluate_rad.py --use_best`).
-The selected step can precede the final 100,000 updates; the final checkpoint must
-still exist as the completed-budget artifact. There is no fallback to final weights.
-The evaluator checks the actual 40,000-update pretrained checkpoint against its recorded SHA256.
-It validates shared configuration/data identities and loads model state strictly.
-Reduced training budgets require `--pilot --checkpoint-step N --pretrain-steps N`.
-Here `--checkpoint-step` specifies the training budget, not the selected best step.
-Short pilot training caps the online evaluation interval at the pilot budget so
-that it also saves a best model. Existing compressor pretraining can be reused;
-old policy runs with best-model saving disabled need to be retrained.
-Repeated evaluations require a fresh `--output-dir`.
+It fails before launching if any run is missing `best-model.pt`. Training
+inherits `save_best_model: True` from regular RAD; the best model is selected
+by the highest mean reward from regular RAD's in-training test-goal evaluation
+(the same model used by `evaluate_rad.py --use_best`). The selected step can
+precede the final 100,000 updates. Each evaluation writes `eval_result.npy`
+(returns with axes `[goal, episode]`) into the run directory and reuses the
+fixed torch seeding of `evaluate_rad.py`, so trials are comparable across
+sizes and seeds.
 
-Each policy runs 100 consecutive episodes on all 8 held-out goals with the same
-20 evaluation seeds and stochastic action sampling. Memory persists across
-episodes of each task and resets for independent evaluation trials. Compression
-event boundaries must agree across sizes and seeds.
+The plot stage averages the 8 held-out goals within each training seed, then
+draws one near-square figure with the mean episode return and a +-1 SEM band
+across training seeds for every memory size. Reduced training budgets via
+`--steps` produce smoke-test artifacts only.
 
 Artifacts under `comparison/` include:
 
-- `protocol.json`: best-checkpoint selection, evaluation settings, device, and software version.
-- `memoryN-trainS.npz`: returns with axes `[evaluation seed, goal, episode]`, goals,
-  evaluation seeds, compression counts/events, checkpoint path, selected step, and selection reward.
-- `per_training_seed.csv`: overall, first-10, first-50, last-20, and after-50
-  episode returns; parameter counts; first/recurrent compression latency;
-  evaluation and training runtime; GPU peak memory; final pretraining MSE;
-  best-checkpoint path, selected step, and selection reward.
-- `summary.csv`: mean, standard deviation, and SEM **across training seeds**,
-  after averaging task/evaluation trials within each training run.
-- `paired_vs_15.csv` and `paired_summary_vs_15.csv`: paired return differences
-  against the 15-latent run with the same training seed (when included).
-- `adaptation.csv`, `adaptation.png`, `adaptation.pdf`: one curve per size with
-  SEM across training seeds. Single-seed pilots have no uncertainty band.
-
-Pretraining MSE is the final training-batch diagnostic, not a held-out estimate.
-Compression timings use eight environments, warmup, and device synchronization.
-GPU memory is reported as zero on CPU. Synthetic/CPU pilots establish pipeline
-correctness only; convergence and production CUDA memory fit need real GPU runs.
+- `memory_size_comparison.pdf` and `memory_size_comparison.png`: the single
+  figure, one curve per memory size (sequential colormap, legend titled
+  "Latent tokens").
+- `curves.csv`: per-size per-episode mean and SEM across training seeds.
+- `per_training_seed.csv`: overall mean return of each training run.
+- `summary.csv`: mean return per size with SEM across training seeds.
+- `protocol.json`: checkpoint selection, evaluator, episodes, and aggregation.
+- `pipeline-manifest.json`: every executed command, its GPU, return code, and
+  wall time (also written when a stage fails).
 
 ## Focused validation
 

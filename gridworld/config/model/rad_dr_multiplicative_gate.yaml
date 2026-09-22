@@ -1,0 +1,7 @@
+include: config/model/rad_dr.yaml
+
+latent_update_mode: multiplicative_gate
+latent_gate_init_bias: 4.0
+run_name: RAD-darkroom-seed0-multiplicative_gate
+pretrain_run_name: RAD-pretrain-darkroom-seed0
+experiment_name: rad_latent_update_comparison

@@ -2,8 +2,8 @@
 Launch RAD latent-update comparison runs.
 
 Example:
-    python scripts/run_rad_latent_update_comparison.py --dry-run
-    python scripts/run_rad_latent_update_comparison.py
+    python scripts/run_rad_latent_update_comparison.py --env dktd --gpus 0 1 2 3 --dry-run
+    python scripts/run_rad_latent_update_comparison.py --env darkroom --gpus 0 5 6 7
 """
 
 import argparse
@@ -15,19 +15,34 @@ import sys
 from pathlib import Path
 
 
-VARIANT_CONFIGS = {
-    'replace': 'rad_dktd_replace',
-    'residual': 'rad_dktd_residual',
-    'multiplicative_gate': 'rad_dktd_multiplicative_gate',
-    'gru_gate': 'rad_dktd_gru_gate',
+VARIANTS = ['replace', 'residual', 'multiplicative_gate', 'gru_gate']
+
+# Per-environment comparison settings. The dktd comparison ran at seed 2;
+# darkroom runs at seed 0.
+ENV_SETTINGS = {
+    'dktd': {
+        'config_stem': 'rad_dktd',
+        'pretrain_config': 'rad_dktd',
+        'default_seed': 2,
+    },
+    'darkroom': {
+        'config_stem': 'rad_dr',
+        'pretrain_config': 'rad_dr',
+        'default_seed': 0,
+    },
 }
 
-DEFAULT_RUN_NAMES = {
-    'replace': 'RAD-dktd-seed0-replace',
-    'residual': 'RAD-dktd-seed0-residual',
-    'multiplicative_gate': 'RAD-dktd-seed0-multiplicative_gate',
-    'gru_gate': 'RAD-dktd-seed0-gru_gate',
-}
+
+def variant_config_name(env, variant):
+    return f'{ENV_SETTINGS[env]["config_stem"]}_{variant}'
+
+
+def variant_run_name(env, seed, variant):
+    return f'RAD-{env}-seed{seed}-{variant}'
+
+
+def pretrain_run_name(env, seed):
+    return f'RAD-pretrain-{env}-seed{seed}'
 
 
 def split_command(command):
@@ -124,7 +139,7 @@ def build_train_command(args, variant, pretrain_ckpt):
     return split_command(args.launcher) + [
         'train_rad.py',
         '--config',
-        VARIANT_CONFIGS[variant],
+        variant_config_name(args.env, variant),
         '--env',
         args.env,
         '--pretrain_ckpt',
@@ -133,7 +148,7 @@ def build_train_command(args, variant, pretrain_ckpt):
 
 
 def build_eval_command(args, variant, runs_root):
-    ckpt_dir = runs_root / DEFAULT_RUN_NAMES[variant]
+    ckpt_dir = runs_root / variant_run_name(args.env, args.seed, variant)
     command = [args.python, 'evaluate_rad.py', '--ckpt_dir', str(ckpt_dir), '--eval_episodes', str(args.eval_episodes)]
     if args.use_best:
         command.append('--use_best')
@@ -172,11 +187,12 @@ def run_variants(args, project_dir, runs_root, pretrain_ckpt):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run RAD latent-update comparison experiments.')
-    parser.add_argument('--env', default='dktd', choices=['dktd'], help='Comparison environment.')
-    parser.add_argument('--variants', nargs='+', default=list(VARIANT_CONFIGS), choices=list(VARIANT_CONFIGS))
+    parser.add_argument('--env', default='dktd', choices=['darkroom', 'dktd'], help='Comparison environment.')
+    parser.add_argument('--variants', nargs='+', default=VARIANTS, choices=VARIANTS)
+    parser.add_argument('--seed', type=int, default=None, help='Env split seed; defaults to 2 for dktd, 0 for darkroom.')
     parser.add_argument('--runs_root', default='./runs', help='Run directory root, relative to gridworld_test by default.')
-    parser.add_argument('--pretrain_config', default='rad_dktd')
-    parser.add_argument('--pretrain_run_name', default='RAD-pretrain-dktd-seed0')
+    parser.add_argument('--pretrain_config', default=None, help='Defaults to the env base RAD config (rad_dktd or rad_dr).')
+    parser.add_argument('--pretrain_run_name', default=None, help='Defaults to RAD-pretrain-<env>-seed<seed>.')
     parser.add_argument('--gpus', nargs='+', required=True, help='GPU indexes for variants, e.g. --gpus 0 1 2 3.')
     parser.add_argument('--pretrain_gpu', default=None, help='GPU index for shared pretraining. Defaults to the first --gpus entry.')
     parser.add_argument('--launcher', default='uv run', help='Launcher for training scripts.')
@@ -195,6 +211,12 @@ def parse_args():
 def main():
     args = parse_args()
     args.used_ports = set()
+    if args.seed is None:
+        args.seed = ENV_SETTINGS[args.env]['default_seed']
+    if args.pretrain_config is None:
+        args.pretrain_config = ENV_SETTINGS[args.env]['pretrain_config']
+    if args.pretrain_run_name is None:
+        args.pretrain_run_name = pretrain_run_name(args.env, args.seed)
     if args.pretrain_gpu is None:
         args.pretrain_gpu = args.gpus[0]
     project_dir = Path(__file__).resolve().parents[1]

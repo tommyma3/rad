@@ -6,27 +6,39 @@ GRU-style memory update. This ablates the bottleneck **and its training loss**.
 
 ## Fixed protocol
 
-- Configs: `rad_dr_ae`, `rad_dr_vae`, `rad_dr_vq_vae`, inheriting `rad_dr.yaml`.
-- Darkroom: 9 x 9, 20 steps/episode, goal split seed 0 (73 train / 8 test).
-- Independent training seeds: 0, 1, 2. Each run has its own pretrained compressor.
+Protocol tag: `darkroom-compressor-legacy-v1`.
+
+- Configs: `rad_dr_ae`, `rad_dr_vae`, `rad_dr_vq_vae`, inheriting
+  `rad_dr_compressor_base.yaml`, which inherits `rad_dr.yaml` **unchanged**.
+  `compressor_type` is the only experimental variable.
+- The runs use the standard `train_rad.py` code path exactly as the historical
+  `RAD-darkroom-seed*` runs: legacy goal split, compiled `ad_transformer` and
+  `compression_transformer`, vanilla optimizer step, and unseeded comparison
+  machinery off. No dataset audit, no pretraining-provenance records, no
+  single-process restriction.
+- Darkroom: 9 x 9, 20 steps/episode, `env_split_seed` 0 (73 train / 8 test
+  goals). Note: under the legacy goal selection the eight in-context evaluation
+  goals (`sample_darkroom` test goals) fall **inside the training set**, same
+  as for the historical AD/RAD runs. Results are comparable to
+  `RAD-darkroom-seed*`, not to the `collection_order`-split DPT/IDT runs.
+- Independent training seeds: 0, 1, 2 (`--seed`). Each run has its own
+  pretrained compressor. Run names: `RAD-darkroom-{variant}-seed{seed}` and
+  `RAD-pretrain-darkroom-{variant}-seed{seed}`.
 - Policy: 4 layers, 4 heads, width 64. Compressor: 3 layers, 4 heads, width 64.
 - Memory: 15 x 64; 90-token policy capacity; retain 5 recent transitions;
   `gru_gate`; no initial latent policy prefix; gradients through 5 recent rounds.
 - Pretraining: 40,000 updates, batch 512, 40-transition windows.
 - RAD: 100,000 updates, batch 256, original curriculum and learning rates.
 - Source: the first 1,000 steps of 100 streams per task in the existing PPO HDF5.
-- One process/GPU per run, sequential launches, gradient accumulation 1.
-- All variants run eagerly (`torch_compile: False`) for this first comparison.
-  This avoids comparing different compilation/fallback behavior. CUDA performance
-  and convergence must still be measured on the training machine.
 
 Shared parameters have identical initialization for a paired training seed.
 Additional heads/codebook are initialized without advancing the shared model RNG.
 The variants do not have exactly the same parameter count; counts are reported.
 Equal token shapes do not imply equal information capacity.
 
-Budgets count successful optimizer updates. AMP overflow retries use the same
-batch, dropout RNG, and latent noise (up to ten attempts); retries are logged.
+Training uses the standard `train_rad.py` update: autocast, gradient clipping,
+and Accelerate's AMP-skip handling. The stricter comparison-only optimizer step
+(AMP overflow retries with RNG restore) is not used.
 
 ## Bottlenecks and objectives
 
@@ -61,31 +73,25 @@ auxiliary loss. The decoder is used only during pretraining.
 
 ## Dataset identity and compatibility
 
-The collector numbers tasks in shuffled collection order. New comparison configs
-explicitly use `dataset_task_mapping: collection_order` and
-`collection_env_split_seed: 0`. The original collection seed must be correct.
-The loader shares the DPT/IDT task-to-group mapping. Before creating a run, a
-read-only audit verifies all selected groups, source lengths/stream counts, and
-Darkroom rewards against their reconstructed goals. It requires positive reward
-evidence for every task; incorrect or incomplete data fails before training.
-The audit hashes the selected states/actions/rewards and records the goal mapping
-in checkpoint configuration. Pretraining and RAD source identities must match.
-RAD checkpoints also record the exact pretrained file hash, completed update
-count, and pretraining settings; the evaluator checks paired pretraining budgets.
-
-Historical configs retain their legacy group selection unless explicitly opted
-in. Retrain AE with the new comparison config: historical curves are not the
-controlled baseline for this corrected split.
+Group selection is the legacy `select_dataset_groups` behavior shared with the
+historical AD/RAD runs: the 81 task ids are shuffled with `env_split_seed` and
+the first 73 groups train. Unlike the DPT/IDT loader, no collection-order
+mapping is applied, and there is no read-only dataset audit or recorded
+`dataset_audit` in checkpoints. The evaluator instead verifies that every
+checkpoint followed this standard protocol: no `compressor_comparison`,
+`memory_size_comparison`, `dataset_task_mapping`, or `dataset_audit` keys, plus
+matching variant/seed/environment settings (see
+`validate_run_protocol` in `scripts/evaluate_compressor_comparison.py`).
 
 Missing `compressor_type` means legacy AE and retains its state-dict keys.
-New variant checkpoints load strictly; cross-variant and mismatched training-seed
-or task-split pretrained checkpoints are rejected. Comparison runs require fresh
-directories. Interrupted training is not resumed, because exact sampler and latent
-RNG continuation is not implemented in this protocol.
+New variant checkpoints load strictly; cross-variant and mismatched
+training-seed or task-split pretrained checkpoints are rejected by
+`validate_checkpoint_config` when loading pretrained compression or resuming.
 
-DataLoader generators, RAD sampling/window RNGs, VAE noise, and evaluation action
-sampling are separate. All variants consume the same data stream for the same
-seed and worker count. Keep worker count and hardware settings fixed.
+Under the vanilla code path, DataLoader and window sampling use unseeded global
+randomness; only model initialization, VAE latent noise, and evaluation action
+sampling are seeded (per training seed and evaluation seed respectively). Keep
+worker count and hardware settings fixed so the variants see comparable streams.
 
 ## Run
 
@@ -124,13 +130,14 @@ Individual entrypoints also accept `--seed`, `--runs_root`, `--run_name`,
 Use the final 100k checkpoint as the controlled result; it is never selected by
 test reward. Training saves `best-model.pt` anyway (`save_best_model: True`),
 and the evaluator accepts `--checkpoint best` to evaluate it: the checkpoint
-that maximized the in-training in-context eval on the eight test goals. Best
+that maximized the in-training in-context eval on the eight evaluation goals. Best
 curves are secondary, test-selected results — they quantify how much of a
 final-checkpoint gap is checkpoint selection, not how a variant trains on
 average. Report the two modes side by side, never intermixed.
 Evaluation retains memory across episodes and resets it for every evaluation seed.
-The evaluator also checks that checkpoint source hashes and shared model/training
-settings agree. All eight goals are evaluated with the same sampled-action seeds.
+The evaluator checks that every checkpoint followed the standard `train_rad.py`
+protocol (no comparison keys) and that shared model/training settings agree
+across runs. All eight goals are evaluated with the same sampled-action seeds.
 
 Outputs under `comparison/` (final checkpoint) or `comparison-best/` (best
 checkpoint; the loaded step is recorded per run since it varies):

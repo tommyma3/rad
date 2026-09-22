@@ -1,10 +1,31 @@
-"""Evaluate best Darkroom memory-size checkpoints with paired task/seed trials."""
+"""End-to-end Darkroom memory-size pipeline: multi-GPU training, best-model evaluation, one figure.
+
+Stages:
+    train      Run train_pretrain_compression.py and train_rad.py for every
+               size/seed, chained per seed and distributed over --gpus
+               (one job per GPU at a time, seeds round-robin across GPUs).
+    evaluate   Run evaluate_rad.py --use_best on every trained run, writing
+               eval_result.npy into each run directory.
+    plot       Aggregate eval_result.npy across training seeds and draw a
+               single near-square paper figure (PDF + PNG) with mean episode
+               return and +-1 SEM over training seeds per memory size.
+    all        train -> evaluate -> plot.
+
+Examples:
+    python scripts/evaluate_memory_size_comparison.py --gpus 0 1 2
+    python scripts/evaluate_memory_size_comparison.py --stage plot
+    python scripts/evaluate_memory_size_comparison.py --gpus 0 --steps 100 \
+        --batch-size 8 --episodes 10   # end-to-end smoke test
+"""
 
 import argparse
-import hashlib
+import csv
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -12,249 +33,301 @@ import torch
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
-from memory_size_experiment import PROTOCOL, SIZES, BASELINE_SIZE, run_name, validate_memory_size_config
-from memory_capacity import policy_token_capacity
-from compressor_experiment import validate_checkpoint_config
-from model.compressed_ad import RAD
-from env import SAMPLE_ENVIRONMENT, make_env
-from stable_baselines3.common.vec_env import DummyVecEnv
-from utils import normalize_compiled_state_dict
-from evaluate_compressor_comparison import metrics, write_csv, synchronize, validate_checkpoint_selection
+from memory_size_experiment import PROTOCOL, SIZES, run_name
 
 
-def comparison_signature(config):
-    """Compare all resolved settings except the independent variable and provenance."""
-    excluded = {'n_compress_tokens', 'seed', 'data_seed', 'device', 'log_dir', 'run_name',
-                'runs_root', 'traj_dir', 'dataset_audit', 'pretrain_checkpoint',
-                'pretrain_provenance', 'amp_retries'}
-    return {key: value for key, value in config.items() if key not in excluded}
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--stage', choices=['all', 'train', 'evaluate', 'plot'], default='all')
+    parser.add_argument('--sizes', nargs='+', type=int, default=list(SIZES))
+    parser.add_argument('--seeds', nargs='+', type=int, default=[0, 1, 2])
+    parser.add_argument('--gpus', nargs='+', default=None,
+                        help='GPU indices for round-robin scheduling; defaults to all visible GPUs')
+    parser.add_argument('--episodes', type=int, default=100,
+                        help='Evaluation episodes passed to evaluate_rad.py --eval_episodes')
+    parser.add_argument('--runs-root', type=Path, default=PROJECT / 'runs/memory_size_darkroom')
+    parser.add_argument('--traj-dir', type=Path, default=PROJECT / 'datasets')
+    parser.add_argument('--output-dir', type=Path, default=None,
+                        help='Defaults to <runs-root>/comparison')
+    parser.add_argument('--config', default='rad_dr_memory_size')
+    parser.add_argument('--python', default=sys.executable)
+    parser.add_argument('--num-workers', type=int)
+    parser.add_argument('--steps', type=int,
+                        help='Training budget override for both phases (smoke tests/pilots)')
+    parser.add_argument('--batch-size', type=int,
+                        help='Per-process batch size override for both phases (smoke tests/pilots)')
+    parser.add_argument('--skip-existing', action='store_true',
+                        help='Skip pretraining with existing pretrain-final.pt and policy training '
+                             'with existing best-model.pt (treated as completed)')
+    parser.add_argument('--dry-run', action='store_true', help='Print commands without executing')
+    return parser.parse_args()
 
 
-def load_best_checkpoint(run, size, seed, training_steps):
-    """Use regular RAD reward selection while requiring the completed-budget artifact."""
-    final_path = run / f'ckpt-{training_steps}.pt'
-    if not final_path.is_file():
-        raise FileNotFoundError(f'Missing completed training checkpoint: {final_path}')
-    checkpoint_path = run / 'best-model.pt'
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-    config = dict(checkpoint['config'])
-    validate_memory_size_config(config)
-    if (config['n_compress_tokens'] != size or config['seed'] != seed or config['data_seed'] != seed
-            or config['train_timesteps'] != training_steps):
-        raise ValueError(f'Checkpoint size/seed/budget mismatch: {checkpoint_path}')
-    validate_checkpoint_selection(checkpoint, config, 'best', training_steps)
-    return checkpoint_path, checkpoint, config
+def validate_args(args):
+    for values in (args.sizes, args.seeds):
+        if len(set(values)) != len(values):
+            raise SystemExit('Size and seed lists must not contain duplicates')
+    if any(size <= 0 or size % 3 for size in args.sizes):
+        raise SystemExit('Sizes must be positive multiples of three')
+    if args.episodes < 1 or (args.steps is not None and args.steps < 1) \
+            or (args.batch_size is not None and args.batch_size < 1):
+        raise SystemExit('Budgets must be positive')
+    if args.num_workers is not None and args.num_workers < 0:
+        raise SystemExit('--num-workers must be nonnegative')
+    if not args.gpus:
+        args.gpus = [str(index) for index in range(torch.cuda.device_count())] or ['0']
 
 
-def aggregate(rows):
-    result = []
-    for size in sorted({row['n_latents'] for row in rows}):
-        subset = [row for row in rows if row['n_latents'] == size]
-        if len({row['train_seed'] for row in subset}) != len(subset):
-            raise ValueError('Duplicate training-seed replicate')
-        for key in ('mean_return', 'early_1_10', 'first_50', 'late_last_20', 'after_50'):
-            values = np.array([row[key] for row in subset if key in row])
-            if not len(values):
+def training_command(args, size, seed, pretrain):
+    command = [args.python, str(PROJECT / ('train_pretrain_compression.py' if pretrain else 'train_rad.py')),
+               '--env', 'darkroom', '--config', args.config, '--n_latents', str(size),
+               '--seed', str(seed), '--env_split_seed', '0',
+               '--runs_root', str(args.runs_root), '--traj_dir', str(args.traj_dir),
+               '--run_name', run_name(size, seed, pretrain)]
+    if args.num_workers is not None:
+        command += ['--num_workers', str(args.num_workers)]
+    if not pretrain:
+        command += ['--pretrain_ckpt',
+                    str(args.runs_root / run_name(size, seed, True) / 'pretrain-final.pt')]
+    if args.steps is not None:
+        command += ['--steps', str(args.steps)]
+    if args.batch_size is not None:
+        command += ['--batch_size', str(args.batch_size)]
+    return command
+
+
+def training_artifact(args, size, seed, pretrain):
+    name = 'pretrain-final.pt' if pretrain else 'best-model.pt'
+    return args.runs_root / run_name(size, seed, pretrain) / name
+
+
+def build_training_jobs(args):
+    """Chain pretrain->train per seed; assign whole seed chains to GPUs round-robin."""
+    jobs_by_gpu = {gpu: [] for gpu in args.gpus}
+    for seed_index, seed in enumerate(args.seeds):
+        gpu = args.gpus[seed_index % len(args.gpus)]
+        for size in args.sizes:
+            for pretrain in (True, False):
+                if args.skip_existing and training_artifact(args, size, seed, pretrain).is_file():
+                    print(f'Skip completed {"pretrain" if pretrain else "train"}: '
+                          f'memory{size} seed{seed}', flush=True)
+                    continue
+                label = f'{"pretrain" if pretrain else "train"}-darkroom-memory{size}-train{seed}'
+                jobs_by_gpu[gpu].append((label, training_command(args, size, seed, pretrain)))
+    return jobs_by_gpu
+
+
+def build_evaluation_jobs(args):
+    jobs = []
+    for seed in args.seeds:
+        for size in args.sizes:
+            run_dir = args.runs_root / run_name(size, seed)
+            if not (run_dir / 'best-model.pt').is_file():
+                if args.dry_run:
+                    print(f'[dry-run] best-model.pt not present yet: {run_dir}', flush=True)
+                else:
+                    raise FileNotFoundError(
+                        f'Missing best-model.pt in {run_dir}; run --stage train first '
+                        f'(or check that training saved a best model)')
+            label = f'evaluate-darkroom-memory{size}-train{seed}'
+            command = [args.python, str(PROJECT / 'evaluate_rad.py'), '--ckpt_dir', str(run_dir),
+                       '--use_best', '--eval_episodes', str(args.episodes)]
+            jobs.append((label, command))
+    jobs_by_gpu = {gpu: [] for gpu in args.gpus}
+    for index, job in enumerate(jobs):
+        jobs_by_gpu[args.gpus[index % len(args.gpus)]].append(job)
+    return jobs_by_gpu
+
+
+def execute_jobs(jobs_by_gpu, dry_run):
+    """Run each GPU's queue serially; queues run in parallel across GPUs."""
+    results, failures = [], []
+    lock = threading.Lock()
+
+    def worker(gpu, jobs):
+        environment = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+        for label, command in jobs:
+            print(f'[GPU {gpu}] {label}: {subprocess.list2cmdline(command)}', flush=True)
+            if dry_run:
                 continue
-            std = float(values.std(ddof=1)) if len(values) > 1 else None
-            result.append(dict(n_latents=size, metric=key, n_training_seeds=len(values),
-                               mean=float(values.mean()), std_over_training_seeds=std,
-                               sem=std / np.sqrt(len(values)) if std is not None else None))
-    return result
+            start = time.monotonic()
+            completed = subprocess.run(command, cwd=PROJECT, env=environment)
+            entry = dict(gpu=str(gpu), label=label, command=command,
+                         returncode=completed.returncode,
+                         seconds=round(time.monotonic() - start, 3))
+            with lock:
+                results.append(entry)
+            status = 'done' if completed.returncode == 0 else f'FAILED({completed.returncode})'
+            print(f'[GPU {gpu}] {label}: {status} in {entry["seconds"]:.1f}s', flush=True)
+            if completed.returncode != 0:
+                with lock:
+                    failures.append(entry)
+                return
+
+    threads = [threading.Thread(target=worker, args=(gpu, jobs), daemon=True)
+               for gpu, jobs in jobs_by_gpu.items() if jobs]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return results, failures
 
 
-def paired_differences(rows):
-    paired = []
-    metric_keys = ('mean_return', 'early_1_10', 'first_50', 'late_last_20', 'after_50')
-    for row in rows:
-        baseline = next((r for r in rows if r['n_latents'] == BASELINE_SIZE
-                         and r['train_seed'] == row['train_seed']), None)
-        if baseline is not None and row['n_latents'] != BASELINE_SIZE:
-            paired.append(dict(n_latents=row['n_latents'], train_seed=row['train_seed'],
-                               **{key: row[key] - baseline[key] for key in metric_keys if key in row}))
-    return paired
+def collect_curves(args):
+    """Return {size: {seed: rewards[goal, episode]}} from evaluate_rad.py outputs."""
+    curves, missing = {}, []
+    for seed in args.seeds:
+        for size in args.sizes:
+            result_path = args.runs_root / run_name(size, seed) / 'eval_result.npy'
+            if not result_path.is_file():
+                missing.append(str(result_path))
+                continue
+            rewards = np.load(result_path)
+            if rewards.ndim != 2:
+                raise ValueError(f'{result_path} must be a 2D [goal, episode] array, '
+                                 f'got shape {rewards.shape}')
+            curves.setdefault(size, {})[seed] = rewards
+    if missing:
+        raise FileNotFoundError('Missing evaluation results (run --stage evaluate first):\n'
+                                + '\n'.join(missing))
+    episode_counts = {rewards.shape[1] for seeds in curves.values() for rewards in seeds.values()}
+    goal_counts = {rewards.shape[0] for seeds in curves.values() for rewards in seeds.values()}
+    if len(episode_counts) != 1 or len(goal_counts) != 1:
+        raise ValueError(f'Inconsistent evaluation shapes: episodes={episode_counts}, goals={goal_counts}')
+    return curves
 
 
-@torch.inference_mode()
-def benchmark_compression(model, device, repeats):
-    results = {}
-    for recurrent in (False, True):
-        length = model._recent_capacity(recurrent) + 1 - model.short_memory_keep_tokens
-        if recurrent:
-            length += model.n_compress_tokens
-        generator = torch.Generator(device=device).manual_seed(12345)
-        context = torch.randn(8, length, model.config['tf_n_embd'], device=device, generator=generator)
-        old = torch.zeros(8, model.n_compress_tokens, model.config['tf_n_embd'], device=device) if recurrent else None
-        for _ in range(3):
-            model._compress_sequence(context, False, old)
-        synchronize(device)
-        start = time.perf_counter()
-        for _ in range(repeats):
-            model._compress_sequence(context, False, old)
-        synchronize(device)
-        results['recurrent_compression_ms' if recurrent else 'first_compression_ms'] = (
-            1000 * (time.perf_counter() - start) / repeats)
-    return results
+def write_csv(filename, rows):
+    if rows:
+        with filename.open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
 
 
-def save_outputs(output, rows, curves):
-    write_csv(output / 'per_training_seed.csv', rows)
-    write_csv(output / 'summary.csv', aggregate(rows))
-    paired = paired_differences(rows)
-    write_csv(output / 'paired_vs_15.csv', paired)
-    write_csv(output / 'paired_summary_vs_15.csv', aggregate(paired))
+def save_plot(curves, output_dir):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    fig, axis = plt.subplots(figsize=(7, 4))
-    curve_rows = []
-    for size in sorted({key[0] for key in curves}):
-        values = np.stack([curve for (n, _), curve in curves.items() if n == size])
-        mean = values.mean(0)
-        sem = values.std(0, ddof=1) / np.sqrt(len(values)) if len(values) > 1 else np.zeros_like(mean)
+
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'font.size': 9,
+        'axes.labelsize': 10,
+        'axes.titlesize': 10,
+        'legend.fontsize': 8,
+        'xtick.labelsize': 8.5,
+        'ytick.labelsize': 8.5,
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'axes.grid': True,
+        'grid.alpha': 0.22,
+        'grid.linewidth': 0.7,
+        'lines.linewidth': 1.8,
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+    })
+
+    sizes = sorted(curves)
+    colors = plt.get_cmap('viridis')(np.linspace(0.05, 0.9, len(sizes)))
+    fig, axis = plt.subplots(figsize=(4.6, 4.2))
+
+    curve_rows, seed_rows, summary_rows = [], [], []
+    for size, color in zip(sizes, colors):
+        # Average held-out goals within each training seed, then across seeds.
+        seed_curves = np.stack([curves[size][seed].mean(axis=0) for seed in sorted(curves[size])])
+        mean = seed_curves.mean(axis=0)
+        sem = (seed_curves.std(axis=0, ddof=1) / np.sqrt(len(seed_curves))
+               if len(seed_curves) > 1 else np.zeros_like(mean))
         episodes = np.arange(1, len(mean) + 1)
-        line, = axis.plot(episodes, mean, label=f'{size} latents')
-        if len(values) > 1:
-            axis.fill_between(episodes, mean - sem, mean + sem, color=line.get_color(), alpha=0.15)
-        curve_rows.extend(dict(n_latents=size, episode=int(e), mean=float(m),
-                               sem=float(s) if len(values) > 1 else None, n_training_seeds=len(values))
-                          for e, m, s in zip(episodes, mean, sem))
-    axis.set(xlabel='Episode', ylabel='Episode return', ylim=(0, 20), title='Darkroom long-term memory size')
-    axis.legend()
+
+        axis.plot(episodes, mean, color=color, label=f'{size}')
+        if len(seed_curves) > 1:
+            axis.fill_between(episodes, mean - sem, mean + sem, color=color, alpha=0.18,
+                              linewidth=0.0)
+
+        per_seed_returns = seed_curves.mean(axis=1)
+        seed_rows.extend(dict(n_latents=size, train_seed=int(seed), mean_return=float(value))
+                         for seed, value in zip(sorted(curves[size]), per_seed_returns))
+        summary_rows.append(dict(n_latents=size, n_training_seeds=len(seed_curves),
+                                 mean_return=float(per_seed_returns.mean()),
+                                 sem_over_training_seeds=(float(per_seed_returns.std(ddof=1)
+                                                                / np.sqrt(len(seed_curves)))
+                                                          if len(seed_curves) > 1 else None)))
+        curve_rows.extend(dict(n_latents=size, episode=int(episode), mean=float(value),
+                               sem=float(band) if len(seed_curves) > 1 else None)
+                          for episode, value, band in zip(episodes, mean, sem))
+
+    axis.set(xlim=(1, len(mean)), ylim=(0, 20), xlabel='Episode', ylabel='Episode return',
+             title='Darkroom: long-term memory size')
+    axis.legend(title='Latent tokens', loc='upper left', ncol=2, frameon=False,
+                handlelength=1.6, columnspacing=1.0, borderaxespad=0.2)
+    axis.margins(x=0.01)
     fig.tight_layout()
-    fig.savefig(output / 'adaptation.png', dpi=180)
-    fig.savefig(output / 'adaptation.pdf')
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figure_paths = []
+    for extension, kwargs in (('pdf', {}), ('png', {'dpi': 400})):
+        figure_path = output_dir / f'memory_size_comparison.{extension}'
+        fig.savefig(figure_path, bbox_inches='tight', **kwargs)
+        figure_paths.append(figure_path)
     plt.close(fig)
-    write_csv(output / 'adaptation.csv', curve_rows)
+
+    write_csv(output_dir / 'per_training_seed.csv', seed_rows)
+    write_csv(output_dir / 'summary.csv', summary_rows)
+    write_csv(output_dir / 'curves.csv', curve_rows)
+    return figure_paths
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--runs-root', type=Path, default=PROJECT / 'runs/memory_size_darkroom')
-    parser.add_argument('--output-dir', type=Path)
-    parser.add_argument('--sizes', nargs='+', type=int, default=list(SIZES))
-    parser.add_argument('--train-seeds', nargs='+', type=int, default=[0, 1, 2])
-    parser.add_argument('--eval-seeds', nargs='+', type=int, default=list(range(20)))
-    parser.add_argument('--episodes', type=int, default=100)
-    parser.add_argument('--checkpoint-step', type=int, default=100000,
-                        help='Completed policy training budget; curves always use best-model.pt')
-    parser.add_argument('--pretrain-steps', type=int, default=40000)
-    parser.add_argument('--pilot', action='store_true')
-    parser.add_argument('--device', default='cuda')
-    parser.add_argument('--benchmark-repeats', type=int, default=50)
-    parser.add_argument('--threads', type=int, default=4)
-    args = parser.parse_args()
-    if min(args.episodes, args.checkpoint_step, args.pretrain_steps, args.benchmark_repeats, args.threads) < 1:
-        parser.error('Budgets must be positive')
-    for values in (args.sizes, args.train_seeds, args.eval_seeds):
-        if len(set(values)) != len(values):
-            parser.error('Size and seed lists must not contain duplicates')
-    if any(size <= 0 or size % 3 for size in args.sizes):
-        parser.error('Sizes must be positive multiples of three')
-    if not args.pilot and (args.checkpoint_step != 100000 or args.pretrain_steps != 40000):
-        parser.error('Reduced training budgets require --pilot')
-    torch.set_num_threads(args.threads)
-    device = torch.device(args.device)
-    output = args.output_dir or args.runs_root / 'comparison'
-    output.mkdir(parents=True, exist_ok=False)
-    protocol = dict(protocol=PROTOCOL, pilot=args.pilot, sizes=args.sizes, train_seeds=args.train_seeds,
-                    eval_seeds=args.eval_seeds, episodes=args.episodes, checkpoint_step=args.checkpoint_step,
-                    checkpoint_selection='best', selection_metric='in_training_eval_mean_reward',
-                    pretrain_steps=args.pretrain_steps, action_sampling=True, device=str(device),
-                    torch_version=torch.__version__, benchmark_repeats=args.benchmark_repeats,
-                    device_name=torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU')
-    (output / 'protocol.json').write_text(json.dumps(protocol, indent=2))
-    reference_audit = reference_signature = reference_pretraining = reference_events = None
-    rows, curves = [], {}
-    for seed in args.train_seeds:
-        for size in args.sizes:
-            run = args.runs_root / run_name(size, seed)
-            checkpoint_path, checkpoint, config = load_best_checkpoint(run, size, seed, args.checkpoint_step)
-            selected_step = checkpoint['step']
-            selection_reward = float(checkpoint['eval_reward'])
-            audit = config.get('dataset_audit', {})
-            if (len(audit.get('train_groups', [])) != 73 or len(audit.get('test_groups', [])) != 8
-                    or set(audit['train_groups']) & set(audit['test_groups'])):
-                raise ValueError('Missing verified 73/8 Darkroom goal split')
-            identity = {key: audit[key] for key in ('data_sha256', 'train_groups', 'test_groups',
-                                                   'group_goals', 'collection_env_split_seed')}
-            signature = comparison_signature(config)
-            if reference_audit is not None and (identity != reference_audit or signature != reference_signature):
-                raise ValueError('Dataset or shared model/training settings differ across sizes/seeds')
-            reference_audit, reference_signature = identity, signature
-            pretrain_run = args.runs_root / run_name(size, seed, True)
-            pretrain_path = pretrain_run / 'pretrain-final.pt'
-            source = torch.load(pretrain_path, map_location='cpu', weights_only=False)
-            validate_checkpoint_config(config, source['config'])
-            provenance = config.get('pretrain_provenance', {})
-            with pretrain_path.open('rb') as stream:
-                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-            if (provenance.get('sha256') != digest or provenance.get('step') != args.pretrain_steps
-                    or source['step'] != args.pretrain_steps
-                    or source['config']['pretrain_timesteps'] != args.pretrain_steps
-                    or source['config']['data_seed'] != seed):
-                raise ValueError('Pretraining checkpoint provenance/budget mismatch')
-            if any(source['config'].get(key) != value for key, value in provenance['settings'].items()):
-                raise ValueError('Recorded pretraining settings disagree with the source checkpoint')
-            settings = comparison_signature(source['config'])
-            if reference_pretraining is not None and settings != reference_pretraining:
-                raise ValueError('Pretraining settings differ across sizes/seeds')
-            reference_pretraining = settings
-            del source
-            config.update(device=device, torch_compile=False)
-            model = RAD(config).to(device).eval()
-            model.load_state_dict(normalize_compiled_state_dict(checkpoint['model']), strict=True)
-            del checkpoint
-            model.set_curriculum(None)
-            _, goals = SAMPLE_ENVIRONMENT['darkroom'](config)
-            rewards, compressions, events = [], [], []
-            if device.type == 'cuda':
-                torch.cuda.reset_peak_memory_stats(device)
-            synchronize(device)
-            start = time.perf_counter()
-            for eval_seed in args.eval_seeds:
-                envs = DummyVecEnv([make_env(config, goal=goal) for goal in goals])
-                try:
-                    envs.seed(eval_seed)
-                    result = model.evaluate_in_context(envs, config['horizon'] * args.episodes, action_seed=eval_seed)
-                finally:
-                    envs.close()
-                rewards.append(result['reward_episode'])
-                compressions.append(result['total_compressions'])
-                events.append(result['compression_events'])
-            synchronize(device)
-            elapsed = time.perf_counter() - start
-            rewards = np.stack(rewards)
-            if rewards.shape != (len(args.eval_seeds), 8, args.episodes):
-                raise ValueError(f'Unexpected reward shape: {rewards.shape}')
-            if reference_events is not None and events != reference_events:
-                raise ValueError('Compression boundaries differ across evaluation runs')
-            reference_events = events
-            np.savez_compressed(output / f'memory{size}-train{seed}.npz', rewards=rewards,
-                                goals=np.asarray(goals), eval_seeds=args.eval_seeds, n_latents=size,
-                                compressions=compressions, compression_events=np.asarray(events),
-                                checkpoint=str(checkpoint_path.resolve()), checkpoint_step=selected_step,
-                                selection_eval_reward=selection_reward, checkpoint_selection='best')
-            row = dict(n_latents=size, train_seed=seed, **metrics(rewards),
-                       checkpoint=str(checkpoint_path.resolve()), checkpoint_step=selected_step,
-                       selection_eval_reward=selection_reward, checkpoint_selection='best',
-                       parameter_count=sum(p.numel() for p in model.parameters()),
-                       compressor_parameter_count=sum(p.numel() for p in model.compression_transformer.parameters()),
-                       latent_values=size * config['tf_n_embd'], policy_token_capacity=policy_token_capacity(config),
-                       total_compressions=compressions[0], eval_seconds=elapsed,
-                       eval_peak_gpu_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else 0,
-                       **benchmark_compression(model, device, args.benchmark_repeats))
-            for stage, directory in (('pretrain', pretrain_run), ('train', run)):
-                stage_metrics = json.loads((directory / f'{stage}-metrics.json').read_text())
-                row[f'{stage}_seconds'] = stage_metrics['elapsed_seconds']
-                row[f'{stage}_peak_gpu_bytes'] = stage_metrics['peak_gpu_bytes']
-                if stage == 'pretrain':
-                    row['pretrain_reconstruction_mse'] = stage_metrics['loss_recon']
-            rows.append(row)
-            curves[(size, seed)] = rewards.mean(axis=(0, 1))
-            print(json.dumps(row), flush=True)
-            del model
-    save_outputs(output, rows, curves)
+    args = parse_args()
+    validate_args(args)
+    args.runs_root = args.runs_root.resolve()
+    args.traj_dir = args.traj_dir.resolve()
+    args.output_dir = (args.output_dir or args.runs_root / 'comparison').resolve()
+    if Path(args.config).suffix in ('.yaml', '.yml'):
+        args.config = str(Path(args.config).resolve())
+
+    manifest = dict(protocol=PROTOCOL, stage=args.stage, sizes=args.sizes, train_seeds=args.seeds,
+                    gpus=args.gpus, episodes=args.episodes, steps=args.steps,
+                    batch_size=args.batch_size, skip_existing=args.skip_existing,
+                    runs_root=str(args.runs_root), traj_dir=str(args.traj_dir),
+                    config=args.config, jobs=[], failures=[])
+    stages = ('train', 'evaluate', 'plot') if args.stage == 'all' else (args.stage,)
+    failures = []
+    try:
+        if 'train' in stages:
+            jobs_by_gpu = build_training_jobs(args)
+            manifest['jobs'], failures = execute_jobs(jobs_by_gpu, args.dry_run)
+            if failures:
+                raise RuntimeError(f'{len(failures)} training job(s) failed; see manifest')
+        if 'evaluate' in stages:
+            jobs_by_gpu = build_evaluation_jobs(args)
+            results, failures = execute_jobs(jobs_by_gpu, args.dry_run)
+            manifest['jobs'] += results
+            if failures:
+                raise RuntimeError(f'{len(failures)} evaluation job(s) failed; see manifest')
+        if 'plot' in stages:
+            figure_paths = save_plot(collect_curves(args), args.output_dir)
+            for figure_path in figure_paths:
+                print(f'Saved {figure_path}', flush=True)
+    finally:
+        manifest['failures'] = [failure['label'] for failure in failures]
+        if not args.dry_run:
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            (args.output_dir / 'pipeline-manifest.json').write_text(
+                json.dumps(manifest, indent=2))
+
+    if not args.dry_run:
+        protocol = dict(protocol=PROTOCOL, checkpoint_selection='best-model.pt',
+                        evaluator='evaluate_rad.py --use_best', episodes=args.episodes,
+                        sizes=args.sizes, train_seeds=args.seeds,
+                        curve_aggregation='mean over held-out goals per training seed; '
+                                          'band is +-1 SEM across training seeds')
+        (args.output_dir / 'protocol.json').write_text(json.dumps(protocol, indent=2))
+        print(f'Artifacts written to {args.output_dir}', flush=True)
 
 
 if __name__ == '__main__':

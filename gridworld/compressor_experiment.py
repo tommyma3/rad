@@ -7,7 +7,7 @@ import random
 
 
 VARIANTS = ('ae', 'vae', 'vq_vae')
-PROTOCOL = 'darkroom-compressor-v1'
+PROTOCOL = 'darkroom-compressor-legacy-v1'
 
 
 def is_comparison(config):

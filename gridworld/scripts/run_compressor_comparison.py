@@ -14,7 +14,7 @@ from compressor_experiment import PROTOCOL, VARIANTS
 
 
 def run_name(variant, seed, pretrain=False):
-    return f"{'RAD-pretrain' if pretrain else 'RAD'}-darkroom-{variant}-split0-train{seed}"
+    return f"{'RAD-pretrain' if pretrain else 'RAD'}-darkroom-{variant}-seed{seed}"
 
 
 def training_commands(args, pilot=False):

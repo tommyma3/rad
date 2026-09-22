@@ -1,20 +1,12 @@
 include: config/model/rad_dr.yaml
 
-# Shared experimental contract. Keep legacy dataset behavior opt-in outside here.
-compressor_comparison: darkroom-compressor-v1
-dataset_task_mapping: collection_order
-collection_env_split_seed: 0
-env_split_seed: 0
-seed: 0
+# Compressor comparison under the standard train_rad.py protocol: the legacy
+# goal split, compiled RAD modules, and the vanilla optimizer step, exactly as
+# for the historical RAD-darkroom-seed* runs. compressor_type is the only
+# experimental variable; the ae/vae/vq_vae configs add it on top of this base.
+# Protocol tag: darkroom-compressor-legacy-v1.
 vae_kl_weight: 0.001
 vae_kl_warmup_steps: 5000
 vae_eval_mode: mean
 vq_codebook_size: 256
 vq_commitment_weight: 0.25
-# Save best-model.pt (selected by the in-training test-goal eval) alongside the
-# final checkpoint. The controlled comparison result remains the final 100k
-# checkpoint; the best checkpoint feeds the secondary, test-selected curve.
-save_best_model: True
-# Independent latent generators and dynamic auxiliary losses run eagerly for
-# this first comparison. All three variants use the same execution mode.
-torch_compile: False
