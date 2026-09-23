@@ -1,0 +1,41 @@
+# Independent protocol; no includes or changes to legacy experiment defaults.
+env: darkroom
+collection_env_split_seed: 0
+n_transit: 30
+n_compress_tokens: 15
+short_memory_keep: 5
+compress_n_layers: 3
+compress_n_heads: 4
+latent_update_mode: gru_gate
+max_gradient_rounds: 5
+max_compressions: null
+min_context_length: 20
+max_context_length: 1000
+label_smoothing: 0.0
+pretrain_timesteps: 40000
+train_timesteps: 20000
+pretrain_batch_size: 512
+train_batch_size: 256
+pretrain_lr: 0.0003
+ad_lr: 0.00003
+compression_lr: 0.0001
+latent_lr: 0.0001
+lr: 0.0001
+beta1: 0.9
+beta2: 0.99
+weight_decay: 0.01
+warmup_fraction: 0.05
+train_n_stream: 100
+train_source_timesteps: 1000
+eval_interval: 1000
+ckpt_interval: 1000
+log_interval: 50
+eval_episodes: 100
+eval_batch_size: 32
+mixed_precision: 'no'
+save_best_model: true
+transfer_curriculum:
+  - {fraction: 0.0, max_compressions: 1, length_distribution: {short: 0.60, medium: 0.35, long: 0.05, very_long: 0.0}}
+  - {fraction: 0.3, max_compressions: 3, length_distribution: {short: 0.35, medium: 0.40, long: 0.20, very_long: 0.05}}
+  - {fraction: 0.5, max_compressions: 6, length_distribution: {short: 0.25, medium: 0.30, long: 0.30, very_long: 0.15}}
+  - {fraction: 0.75, max_compressions: null, length_distribution: {short: 0.25, medium: 0.25, long: 0.25, very_long: 0.25}}

@@ -1,0 +1,16 @@
+include: rad_ad_transfer_dr.yaml
+env: dktd
+collection_env_split_seed: 2
+n_transit: 72
+n_compress_tokens: 60
+short_memory_keep: 10
+compress_n_layers: 4
+min_context_length: 100
+pretrain_timesteps: 50000
+pretrain_batch_size: 1024
+train_batch_size: 1024
+transfer_curriculum:
+  - {fraction: 0.0, max_compressions: 2, length_distribution: {short: 0.30, medium: 0.55, long: 0.15, very_long: 0.0}}
+  - {fraction: 0.25, max_compressions: 4, length_distribution: {short: 0.20, medium: 0.45, long: 0.30, very_long: 0.05}}
+  - {fraction: 0.5, max_compressions: 6, length_distribution: {short: 0.15, medium: 0.35, long: 0.30, very_long: 0.20}}
+  - {fraction: 0.75, max_compressions: null, length_distribution: {short: 0.15, medium: 0.30, long: 0.30, very_long: 0.25}}
