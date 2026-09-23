@@ -1,0 +1,24 @@
+experiment: old-recent-evidence-v1
+# A separate, balanced ten-arm diagnostic; does not inherit environment defaults.
+num_arms: 10
+reward_std: 0.3
+pulls_per_arm: 5
+context_steps: 50
+short_memory_keep: 5
+gap_compressions: 2
+data_seed: 1729
+train_tasks: 10000
+validation_tasks: 1000
+test_tasks: 2000
+training:
+  train_steps: 20000
+  batch_size: 64
+  warmup_steps: 500
+  eval_interval: 500
+  checkpoint_interval: 1000
+  lr: 0.0003
+  ad_lr: 0.0003
+  compression_lr: 0.0001
+  latent_lr: 0.0003
+  mixed_precision: "no"
+

@@ -4,6 +4,9 @@ Standalone uv project for UCB learning histories, Algorithm Distillation (AD),
 and Recurrent Algorithm Distillation (RAD). All implementation files live here;
 the other environment projects are independent.
 
+For the isolated old-versus-recent evidence integration diagnostic and its
+independent-runs-per-GPU launcher, see [OLD_RECENT_EVIDENCE.md](OLD_RECENT_EVIDENCE.md).
+
 ## Benchmark contract
 
 One fixed 10-arm task generates 50 genuine pulls, D irrelevant transitions,
