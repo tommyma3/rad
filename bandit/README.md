@@ -7,6 +7,10 @@ the other environment projects are independent.
 For the isolated old-versus-recent evidence integration diagnostic and its
 independent-runs-per-GPU launcher, see [OLD_RECENT_EVIDENCE.md](OLD_RECENT_EVIDENCE.md).
 
+For 100k-update AD-short/AD-long/RAD training with periodic 100-pull online
+regret evaluation, a multi-GPU job queue, and paper figures, see
+[TRAINING_CONVERGENCE.md](TRAINING_CONVERGENCE.md).
+
 ## Benchmark contract
 
 One fixed 10-arm task generates 50 genuine pulls, D irrelevant transitions,

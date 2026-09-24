@@ -52,7 +52,7 @@ def save_checkpoint(accelerator, model, run_dir, step, config, data_digests, pre
 
 
 def train(config, dataset_dir, run_dir, *, pretrain=False, resume=None, pretrained=None,
-          stop_after=None, cpu=False):
+          stop_after=None, cpu=False, evaluation_callback=None):
     config = dict(config)
     dataset_dir, run_dir = Path(dataset_dir), Path(run_dir)
     if resume and pretrained:
@@ -127,6 +127,24 @@ def train(config, dataset_dir, run_dir, *, pretrain=False, resume=None, pretrain
     end_step = min(steps, stop_after) if stop_after is not None else steps
     if end_step <= start_step:
         raise ValueError("Requested end step must exceed the resumed step")
+
+    def online_evaluation(step):
+        if evaluation_callback is None:
+            return
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            unwrapped = accelerator.unwrap_model(model)
+            was_training = unwrapped.training
+            # Evaluation must not advance dropout/training RNG streams.
+            devices = [accelerator.device.index] if accelerator.device.type == "cuda" else []
+            with torch.random.fork_rng(devices=devices):
+                try:
+                    evaluation_callback(unwrapped, step)
+                finally:
+                    unwrapped.train(was_training)
+        accelerator.wait_for_everyone()
+
+    online_evaluation(start_step)
     for update in range(start_step, end_step):
         model.train()
         total_loss = torch.zeros((), device=accelerator.device)
@@ -164,6 +182,7 @@ def train(config, dataset_dir, run_dir, *, pretrain=False, resume=None, pretrain
                     metrics += torch.stack((output["loss"], output["accuracy"]))
             metrics /= config["validation_batches"]
             log.update(validation_loss=float(metrics[0]), validation_accuracy=float(metrics[1]))
+            online_evaluation(step)
         if writer and len(log) > 1:
             with (run_dir / "metrics.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(log) + "\n")
