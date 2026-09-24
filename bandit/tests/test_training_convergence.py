@@ -8,12 +8,14 @@ import numpy as np
 import torch
 
 from bandit.collect import collect_dataset
-from bandit.convergence_experiment import evaluate_model, evaluation_steps, plot_results
+from bandit.convergence_experiment import (evaluate_model, evaluation_steps, plot_results,
+    resolve_pretrained, verify_pretrained)
 from bandit.env import sample_task
 from bandit.evaluation import make_eval_manifest
 from bandit.scripts.run_training_convergence import main
 from bandit.tests.test_bandit import tiny_config
 from bandit.training import load_checkpoint, train
+from bandit.utils import load_config
 
 
 class ConstantModel:
@@ -36,6 +38,41 @@ class ConstantModel:
 
 
 class ConvergenceTests(unittest.TestCase):
+    def test_pretrained_launcher_initialization_provenance_and_resume(self):
+        torch.set_num_threads(1)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            config = load_config("rad")
+            config.update(train_steps=1, batch_size=2, validation_batches=1)
+            collect_dataset(base / "data", config, tasks=4, validation_tasks=2)
+            source = train(config, base / "data", base / "pretrain_s0", pretrain=True, cpu=True)
+            template = str(base / "pretrain_s{seed}" / source.name)
+            resolved = resolve_pretrained(template, [0], config)
+            self.assertEqual(resolved["0"]["step"], 1)
+            with self.assertRaisesRegex(ValueError, "architecture"):
+                resolve_pretrained(template, [0], {**config, "context_steps": 51})
+            root = base / "experiment"
+            main(["--root", str(root), "--cpu", "--steps", "2", "--eval-interval", "1",
+                  "--dataset", str(base / "data"), "--eval-tasks", "1", "--batch-size", "2",
+                  "--seeds", "0", "--threads", "1", "--pretrained", template])
+            plan = json.loads((root / "plan.json").read_text())
+            self.assertEqual(plan["rad_pretrained"], resolved)
+            manifest = json.loads((root / "evaluation_manifest.json").read_text())
+            model, _ = load_checkpoint(source)
+            initial = json.loads((root / "evaluations/rad_s0/step-0000000.json").read_text())
+            self.assertEqual(initial["rows"], evaluate_model(model, manifest, plan["delays"]))
+            for method in ("ad_short", "ad_long", "rad"):
+                _, payload = load_checkpoint(root / f"{method}_s0/checkpoint-0000002")
+                self.assertEqual("pretrained_source" in payload["config"], method == "rad")
+            self.assertIn("pretraining updates are additional", (root / "plots/caption.txt").read_text())
+            main(["--root", str(root), "--cpu", "--resume", "--threads", "1"])
+            with self.assertRaisesRegex(ValueError, "compression-pretraining"):
+                resolve_pretrained(str(root / "rad_s0/checkpoint-0000002"), [0], config)
+            with (source / "model.pt").open("ab") as handle:
+                handle.write(b"changed")
+            with self.assertRaisesRegex(ValueError, "checkpoint changed"):
+                verify_pretrained(plan)
+
     def test_exact_regret_ignores_distractors(self):
         task = sample_task(12, num_arms=5)
         manifest = {"records": [{"task": task.to_dict(), "reward_seed": 1,

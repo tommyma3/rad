@@ -3,8 +3,9 @@
 Train the standard AD-short, AD-long, and RAD models for **100,000 optimizer
 updates each**, evaluating online cumulative expected regret at a configurable
 interval. The protocol uses **5 arms and 100 genuine pulls**, with 50 pulls before
-and 50 after the distractor gap. RAD starts from scratch, without additional
-compression pretraining. Existing model defaults and other experiments are unchanged.
+and 50 after the distractor gap. RAD starts from scratch by default; pass
+`--pretrained` to initialize it from compression pretraining. Existing model
+defaults and other experiments are unchanged.
 
 From the repository root on a CUDA server:
 
@@ -37,6 +38,37 @@ AD-long's full-history capacity. The standard backbone, optimizers, target
 sampling and training schedule are reused. All three train for the requested
 update budget; checkpoints are evaluated at their current training step, without
 best-checkpoint selection. Equal updates/batch sizes do not mean equal compute.
+
+## Pretrained RAD initialization
+
+Pass a compression-pretraining checkpoint directory or its `model.pt` file:
+
+```bash
+uv run --project bandit python bandit/scripts/run_training_convergence.py \
+  --gpus 0 1 2 --seeds 0 1 2 --steps 100000 --eval-interval 1000 \
+  --pretrained 'runs/pretrain_s{seed}/checkpoint-0020000' \
+  --root runs/training_convergence_pretrained_v1
+```
+
+`{seed}` selects the corresponding checkpoint for each training seed. A path
+without `{seed}` shares one initialization across all RAD runs. Paths resolve
+under `bandit/`. The checkpoints must already exist; the launcher does not run
+compression pretraining. Checkpoint schema, phase and RAD architecture are
+validated before launching or collecting data.
+
+This uses the existing trainer's `--pretrained` behavior: it loads the full RAD
+model state, including the compressor, policy and token embeddings from that
+pretraining checkpoint. AD-short and AD-long remain initialized from scratch.
+All three then receive the full requested distillation budget (100,000 by
+default); compression-pretraining updates are additional and excluded from the
+plot's training-update axis. Step 0 evaluates RAD after loading the checkpoint.
+
+The frozen plan records each source's absolute path, SHA-256, pretraining step,
+seed and dataset hashes. RAD's saved training configuration also records its
+source. Source files must remain available and unchanged for resume. Resume
+continues the saved model and optimizer without reapplying pretrained weights;
+it rejects a different `--pretrained` initialization. Omit `--pretrained` on
+resume to use the saved plan. The generated caption identifies pretrained RAD.
 
 ## Evaluation and figures
 
@@ -108,7 +140,8 @@ uv run --project bandit python bandit/scripts/run_training_convergence.py \
 ```
 
 Resume reads all scientific settings from the saved plan; new CLI training or
-evaluation settings are ignored. Changed data or manifests are rejected.
+evaluation settings are ignored, while an explicitly supplied `--pretrained`
+must match the saved initialization. Changed data or manifests are rejected.
 Completed runs are skipped, and incomplete runs resume their most recent complete
 checkpoint. Evaluation files beyond that checkpoint are deterministically
 recomputed. An interruption before the first checkpoint requires a fresh root.

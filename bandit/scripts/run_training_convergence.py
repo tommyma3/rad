@@ -10,7 +10,7 @@ if __package__ in (None, ""):
 
 from bandit.collect import collect_dataset
 from bandit.convergence_experiment import (METHODS, PROTOCOL, plot_results,
-    train_worker, verify_data, verify_held_out)
+    resolve_pretrained, train_worker, verify_data, verify_held_out, verify_pretrained)
 from bandit.dataset import BanditDataset, assert_disjoint
 from bandit.evaluation import make_eval_manifest
 from bandit.scripts.run_old_recent_evidence import resolve_devices, schedule_jobs, worker_environment
@@ -21,6 +21,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default="runs/training_convergence_v1")
     parser.add_argument("--dataset", help="Existing standard Gaussian collection; otherwise collect inside root")
+    parser.add_argument("--pretrained", help="RAD compression-pretraining checkpoint (directory or model.pt); supports {seed}")
     parser.add_argument("--gpus", nargs="+", default=["0", "1", "2"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
     parser.add_argument("--steps", type=int, default=100000)
@@ -63,6 +64,11 @@ def main(argv=None):
         plan = json.loads((root / "plan.json").read_text(encoding="utf-8"))
         if plan.get("protocol") != PROTOCOL:
             raise ValueError("Incompatible convergence experiment")
+        if args.pretrained is not None:
+            requested = resolve_pretrained(args.pretrained, plan["seeds"], plan["configs"]["rad"])
+            if requested != plan.get("rad_pretrained", {}):
+                raise ValueError("Resume cannot change RAD's pretrained initialization; use a fresh root")
+        verify_pretrained(plan)
     else:
         configs = {}
         for method in METHODS:
@@ -78,6 +84,7 @@ def main(argv=None):
             "train_tasks": args.train_tasks, "validation_tasks": args.validation_tasks,
             "dataset": str(project_path(args.dataset).resolve() if args.dataset else root / "data"),
             "device_type": "cpu" if args.cpu else "cuda"}
+        plan["rad_pretrained"] = resolve_pretrained(args.pretrained, args.seeds, configs["rad"])
     if plan["device_type"] != ("cpu" if args.cpu else "cuda"):
         raise ValueError("Resume must preserve CPU/CUDA device type")
     if args.cpu and plan["configs"]["ad_short"]["mixed_precision"] != "no":

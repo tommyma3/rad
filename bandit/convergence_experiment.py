@@ -9,12 +9,38 @@ from .dataset import BanditDataset
 from .env import BanditTask
 from .evaluation import ModelPolicy
 from .rollout import generate_history
-from .training import train
-from .utils import file_digest, write_json
+from .training import ARCHITECTURE_KEYS, load_checkpoint, train
+from .utils import file_digest, project_path, write_json
 
 PROTOCOL = "bandit-training-convergence-v1"
 METHODS = ("ad_short", "ad_long", "rad")
 LABELS = {"ad_short": "AD-short", "ad_long": "AD-long", "rad": "RAD"}
+
+
+def resolve_pretrained(value, seeds, config):
+    """Freeze a shared checkpoint or a {seed} path template before launching."""
+    if value is None:
+        return {}
+    sources = {}
+    for seed in seeds:
+        path = project_path(value.format(seed=seed)).resolve()
+        if path.is_dir():
+            path = path / "model.pt"
+        _, payload = load_checkpoint(path)
+        if payload["phase"] != "pretrain":
+            raise ValueError("--pretrained requires a compression-pretraining checkpoint")
+        if any(config.get(key) != payload["config"].get(key) for key in ARCHITECTURE_KEYS):
+            raise ValueError(f"Pretrained architecture differs from RAD configuration: {path}")
+        sources[str(seed)] = {"path": str(path), "sha256": file_digest(path),
+            "step": payload["step"], "seed": payload["config"]["seed"],
+            "data_digests": payload["data_digests"]}
+    return sources
+
+
+def verify_pretrained(plan):
+    for source in plan.get("rad_pretrained", {}).values():
+        if file_digest(source["path"]) != source["sha256"]:
+            raise ValueError(f"Pretrained checkpoint changed: {source['path']}")
 
 
 def evaluation_steps(steps, interval):
@@ -71,6 +97,11 @@ def train_worker(root, method, seed, *, cpu=False, resume=False):
         raise ValueError("Worker does not match experiment plan")
     manifest = verify_data(plan, root)
     config = {**plan["configs"][method], "seed": seed}
+    source = plan.get("rad_pretrained", {}).get(str(seed)) if method == "rad" else None
+    if source is not None:
+        if file_digest(source["path"]) != source["sha256"]:
+            raise ValueError("Pretrained checkpoint changed")
+        config["pretrained_source"] = source
     run = root / f"{method}_s{seed}"
     points = root / "evaluations" / run.name
     steps = evaluation_steps(config["train_steps"], config["eval_interval"])
@@ -103,6 +134,7 @@ def train_worker(root, method, seed, *, cpu=False, resume=False):
             for delay in plan["delays"]}}), flush=True)
 
     return train(config, plan["dataset"], run, resume=checkpoint, cpu=cpu,
+                 pretrained=source["path"] if source is not None and checkpoint is None else None,
                  evaluation_callback=callback)
 
 
@@ -186,6 +218,9 @@ def plot_results(root):
         f"on {len(task_ids)} fixed held-out tasks. "
         + (f"Shading shows one sample standard deviation across {len(plan['seeds'])} training-seed means. "
            if len(plan["seeds"]) > 1 else "One training seed; no training-seed uncertainty is shown. ")
-        + "Distractor transitions are excluded. RAD is trained from scratch; all methods use the same update budget.\n",
+        + "Distractor transitions are excluded. "
+        + ("RAD is initialized from compression-pretraining checkpoints; pretraining updates are additional "
+           "and excluded from the horizontal axis. " if plan.get("rad_pretrained") else "RAD is trained from scratch. ")
+        + "All methods use the same distillation update budget.\n",
         encoding="utf-8")
     return output
